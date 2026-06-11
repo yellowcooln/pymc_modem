@@ -1,0 +1,2 @@
+fabc4bb8cede41c34d97b9e7b76286cca7a48d50302f7b29c56c0ba4583d03fa  firmware.hex
+24ed023dae8c96318336e15df3423c776c39d60156bc24be5d072d3d06b9cbea  firmware.zip
