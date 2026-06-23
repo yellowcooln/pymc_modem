@@ -34,6 +34,9 @@
 #  include <esp_task_wdt.h>
 #  include <esp_system.h>
 #  include <esp_mac.h>
+#  if defined(BOARD_PHOTON_1W_XIAO_ESP32C6)
+#    include <driver/temperature_sensor.h>
+#  endif
 #  if defined(BOARD_HELTEC_TRACKER_V2)
 #    include "tft_display.h"
 #  else
@@ -348,13 +351,53 @@ static bool readBatteryChargeRatePctPerHour(float& pctPerHour) {
     return true;
 }
 
+static int8_t clampTemperatureC(float tempC) {
+    if (!isfinite(tempC)) return 0;
+    if (tempC < -128.0f) return -128;
+    if (tempC > 127.0f) return 127;
+    return (int8_t)(tempC + (tempC >= 0.0f ? 0.5f : -0.5f));
+}
+
+static int8_t readDieTemperatureC() {
+#if defined(BOARD_PHOTON_1W_XIAO_ESP32C6)
+    // Arduino-ESP32's temperatureRead() configures the IDF temperature sensor
+    // for 10..50 C. Photon C6 units can sit in weatherproof enclosures in
+    // direct sun, so use the ESP32-C6 20..100 C range to cover both room-temp
+    // boot and hot outdoor operation.
+    static temperature_sensor_handle_t tempSensor = nullptr;
+    static bool initialized = false;
+    static bool available = false;
+
+    if (!initialized) {
+        initialized = true;
+        temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
+        if (temperature_sensor_install(&config, &tempSensor) == ESP_OK &&
+            temperature_sensor_enable(tempSensor) == ESP_OK) {
+            available = true;
+        } else if (tempSensor != nullptr) {
+            temperature_sensor_uninstall(tempSensor);
+            tempSensor = nullptr;
+        }
+    }
+
+    if (available) {
+        float tempC = NAN;
+        if (temperature_sensor_get_celsius(tempSensor, &tempC) == ESP_OK) {
+            return clampTemperatureC(tempC);
+        }
+    }
+#endif
+
+    return clampTemperatureC(temperatureRead());
+}
+
 namespace RuntimeStats {
 Snapshot capture() {
     Snapshot snap = {};
     snap.status = status;
     snap.status.uptime_sec = millis() / 1000;
     snap.status.radio_state = radioStandby ? 2 : (isTxActive ? 1 : 0);
-    snap.status.temp_c = (int8_t)temperatureRead();
+    snap.status.temp_c = readDieTemperatureC();
     snap.status.noise_floor_x10 = (int16_t)(noiseFloor * 10.0f);
     snap.status.battery_mv = readBatteryMilliVolts();
     snap.radio = currentConfig;
@@ -1057,7 +1100,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         status.uptime_sec = millis() / 1000;
         status.radio_state = isTxActive ? 1 : 0;
 #ifdef ARDUINO_ARCH_ESP32
-        status.temp_c = (int8_t)temperatureRead();
+        status.temp_c = readDieTemperatureC();
         status.battery_mv = readBatteryMilliVolts();
 #else
         status.temp_c = 0;   // nRF52 has its own temperature sensor — TODO
