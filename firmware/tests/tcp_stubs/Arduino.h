@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <utility>
 
 class String {
@@ -19,6 +20,11 @@ private:
 };
 
 struct FakeSerial {
+    std::vector<uint8_t> output;
+    size_t write(const uint8_t* bytes, size_t len) {
+        output.insert(output.end(), bytes, bytes + len);
+        return len;
+    }
     template <typename... Args> void printf(const char*, Args...) {}
     void println(const char*) {}
 };

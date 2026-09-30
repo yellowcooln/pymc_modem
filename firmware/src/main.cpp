@@ -22,7 +22,7 @@
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
 #include "frame_parser.h"
-#include "tcp_endpoint_identity.h"
+#include "response_route.h"
 #include "compat.h"
 #include "rf_frontend.h"
 #include "agc_maintenance.h"
@@ -51,6 +51,7 @@
 #  endif
 #  include "wifi_manager.h"
 #  include "tcp_server.h"
+#  include "tcp_session.h"
 #  include "ota_manager.h"
 #  include "ethernet_manager.h"
 #  include "runtime_stats.h"
@@ -579,7 +580,9 @@ static void configureStaticGpios() {
 
 // ─── Frame output ────────────────────────────────────────────
 static void writeFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                       bool toSerial, bool toTCP, bool toUart) {
+                       bool toSerial, bool toTCP, bool toUart,
+                       TcpSession* replySession = nullptr,
+                       uint32_t replyGeneration = 0) {
     uint8_t buf[MAX_FRAME_SIZE];
     uint16_t i = 0;
     buf[i++] = PROTO_SYNC;
@@ -603,7 +606,14 @@ static void writeFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
         Serial.write(buf, i);
     }
     if (toTCP) {
-        TCPServer::write(buf, i);
+#ifdef ARDUINO_ARCH_ESP32
+        if (replySession) replySession->writeForRoute(buf, i, replyGeneration);
+        else TCPServer::write(buf, i); // legacy broadcasts
+#else
+        (void)replySession;
+        (void)replyGeneration;
+        TCPServer::write(buf, i); // W5100S legacy socket
+#endif
     }
     if (toUart && uartEnabled) {
         PROTO_UART.write(buf, i);
@@ -615,6 +625,18 @@ void sendFrame(uint8_t cmd, const uint8_t* payload, uint16_t len, TransportSourc
                dest == TransportSource::USB,
                dest == TransportSource::TCP,
                dest == TransportSource::UART);
+}
+
+void sendFrame(uint8_t cmd, const uint8_t* payload, uint16_t len, ResponseRoute route) {
+    writeFrame(cmd, payload, len,
+               route.source == TransportSource::USB,
+               route.source == TransportSource::TCP,
+               route.source == TransportSource::UART,
+               route.tcp, route.tcpGeneration);
+}
+
+void sendError(uint8_t errCode, ResponseRoute route) {
+    sendFrame(CMD_ERROR, &errCode, 1, route);
 }
 
 void sendError(uint8_t errCode, TransportSource dest) {
@@ -890,7 +912,8 @@ void handleLoRaRx() {
 
 // ─── Host command dispatch ──────────────────────────────────
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                        TransportSource src) {
+                        ResponseRoute route) {
+    const TransportSource src = route.source;
     // Any successfully-processed host frame counts toward OTA sanity.
     OTAManager::notifyValidFrame();
 
@@ -903,7 +926,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         case CMD_TX_REQUEST:  case CMD_SET_CONFIG:  case CMD_GET_CONFIG:
         case CMD_STATUS_REQ:  case CMD_NOISE_REQ:   case CMD_CAD_REQUEST:
         case CMD_RX_START:    case CMD_SET_CAD_PARAMS:
-            sendError(ERR_NO_RADIO, src);
+            sendError(ERR_NO_RADIO, route);
             return;
         default:
             break;  // PING / GET_VERSION / WiFi / AUTH stay live
@@ -914,7 +937,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
     case CMD_TX_REQUEST: {
         if (len == 0 || len > MAX_LORA_PAYLOAD) {
-            sendError(ERR_PAYLOAD_TOO_BIG, src);
+            sendError(ERR_PAYLOAD_TOO_BIG, route);
             break;
         }
         // Reception guard, independent of auto-CAD: a frame being received
@@ -923,7 +946,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // its terminal IRQ delivers it to the host, and the host retries the
         // TX within its LBT budget on ERR_CHANNEL_BUSY.
         if (isReceivingPacket()) {
-            sendError(ERR_CHANNEL_BUSY, src);
+            sendError(ERR_CHANNEL_BUSY, route);
             break;
         }
         // v0.5.7: non-blocking TX with our own timeout.
@@ -1000,13 +1023,13 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             // state; leave RX and its terminal IRQ untouched for loop().
             if (reception_busy) {
                 primaryRadioRuntime.txActive = false;
-                sendError(ERR_CHANNEL_BUSY, src);
+                sendError(ERR_CHANNEL_BUSY, route);
                 break;
             }
             if (!channel_clear) {
                 LOG_R_WARN("auto-CAD: channel busy after retries, abort TX");
                 primaryRadioRuntime.txActive = false;
-                sendError(ERR_CHANNEL_BUSY, src);
+                sendError(ERR_CHANNEL_BUSY, route);
                 startReceive();
                 break;
             }
@@ -1031,7 +1054,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             primaryRadioRuntime.txActive = false;
             radio.finishTransmit();
             setTxLed(false);
-            sendError(ERR_TX_TIMEOUT, src);
+            sendError(ERR_TX_TIMEOUT, route);
             startReceive();
             break;
         }
@@ -1068,7 +1091,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             resp[1] = (airtime_us >> 8) & 0xFF;
             resp[2] = (airtime_us >> 16) & 0xFF;
             resp[3] = (airtime_us >> 24) & 0xFF;
-            sendFrame(CMD_TX_DONE, resp, 4, src);
+            sendFrame(CMD_TX_DONE, resp, 4, route);
             LOG_R_INFO("TX_DONE airtime=%lu us, sent via src=%u",
                        (unsigned long)airtime_us, (unsigned)src);
         } else {
@@ -1079,7 +1102,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             radio.standby();
             delay(5);
             applyConfig(primaryRadioConfig.config());
-            sendError(ERR_TX_TIMEOUT, src);
+            sendError(ERR_TX_TIMEOUT, route);
         }
         startReceive();
         break;
@@ -1092,7 +1115,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // terminal IRQ will deliver it to the host.
         if (isReceivingPacket()) {
             uint8_t result[1] = {1};
-            sendFrame(CMD_CAD_RESP, result, 1, src);
+            sendFrame(CMD_CAD_RESP, result, 1, route);
             break;
         }
         // v0.5.8: non-blocking CAD with our own timeout.
@@ -1126,7 +1149,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
         if (state != RADIOLIB_ERR_NONE) {
             primaryRadioRuntime.clearIrq();
-            sendError(ERR_CAD_FAILED, src);
+            sendError(ERR_CAD_FAILED, route);
             startReceive();
             break;
         }
@@ -1151,7 +1174,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             delay(5);
             applyConfig(primaryRadioConfig.config());
             primaryRadioRuntime.clearIrq();
-            sendError(ERR_CAD_FAILED, src);
+            sendError(ERR_CAD_FAILED, route);
             startReceive();
             break;
         }
@@ -1161,7 +1184,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         primaryRadioRuntime.clearIrq();
         uint8_t result[1];
         result[0] = (cadIrq & RADIOLIB_SX126X_IRQ_CAD_DETECTED) ? 1 : 0;
-        sendFrame(CMD_CAD_RESP, result, 1, src);
+        sendFrame(CMD_CAD_RESP, result, 1, route);
         // Back to RX right away: the scan parked the radio in standby, and
         // the host probes every ~200 ms for its whole LBT budget — without
         // this the modem is deaf between probes, so it can neither receive
@@ -1172,7 +1195,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
     case CMD_SET_CAD_PARAMS: {
         if (len != 4) {
-            sendError(ERR_INVALID_CONFIG, src);
+            sendError(ERR_INVALID_CONFIG, route);
             break;
         }
         primaryRadioRuntime.cad.setParams(payload);
@@ -1183,20 +1206,20 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // scanChannel() waiting forever. A short settle delay is enough
         // for the register write to commit; the first real CAD_REQUEST
         // from the host will then behave normally.
-        sendFrame(CMD_CAD_PARAMS_RESP, payload, 4, src);
+        sendFrame(CMD_CAD_PARAMS_RESP, payload, 4, route);
         delay(30);
         break;
     }
 
     case CMD_RX_START: {
         startReceive();
-        sendFrame(CMD_RX_STARTED, nullptr, 0, src);
+        sendFrame(CMD_RX_STARTED, nullptr, 0, route);
         break;
     }
 
     case CMD_SET_CONFIG: {
         if (!primaryRadioConfig.setFromWire(payload, len)) {
-            sendError(ERR_INVALID_CONFIG, src);
+            sendError(ERR_INVALID_CONFIG, route);
             break;
         }
         LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s freq=%lu bw=%lu sf=%u cr=%u pwr_req=%d sync=0x%04X pre=%u",
@@ -1208,23 +1231,23 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                    (unsigned)primaryRadioConfig.config().syncword,
                    (unsigned)primaryRadioConfig.config().preamble_len);
         if (applyConfig(primaryRadioConfig.config())) {
-            sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), src);
+            sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), route);
             startReceive();
         } else {
-            sendError(ERR_INVALID_CONFIG, src);
+            sendError(ERR_INVALID_CONFIG, route);
         }
         break;
     }
 
     case CMD_GET_CONFIG: {
-        sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), src);
+        sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), route);
         break;
     }
 
     case CMD_STATUS_REQ: {
         const RuntimeStats::Snapshot live = RuntimeStats::capture();
         status = live.status;
-        sendFrame(CMD_STATUS_RESP, (uint8_t*)&status, sizeof(StatusResp), src);
+        sendFrame(CMD_STATUS_RESP, (uint8_t*)&status, sizeof(StatusResp), route);
         break;
     }
 
@@ -1233,27 +1256,27 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         uint8_t resp[2];
         resp[0] = nf & 0xFF;
         resp[1] = (nf >> 8) & 0xFF;
-        sendFrame(CMD_NOISE_RESP, resp, 2, src);
+        sendFrame(CMD_NOISE_RESP, resp, 2, route);
         break;
     }
 
     case CMD_GET_WIFI: {
         uint8_t buf[200];
         uint16_t n = buildWifiStatusPayload(buf);
-        sendFrame(CMD_WIFI_STATUS, buf, n, src);
+        sendFrame(CMD_WIFI_STATUS, buf, n, route);
         break;
     }
 
     case CMD_SET_WIFI: {
 #ifndef ARDUINO_ARCH_ESP32
-        sendError(ERR_INVALID_CMD, src);   // no Wi-Fi stack on this build
+        sendError(ERR_INVALID_CMD, route);   // no Wi-Fi stack on this build
         break;
 #else
         // Remote provisioning over USB — eliminates the need to physically
         // connect to the Heltec's AP portal.
         WifiManager::Config newCfg;
         if (!parseSetWifi(payload, len, newCfg)) {
-            sendError(ERR_INVALID_WIFI, src);
+            sendError(ERR_INVALID_WIFI, route);
             break;
         }
 
@@ -1261,7 +1284,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         WifiManager::saveConfig(newCfg);
         uint8_t buf[200];
         uint16_t n = buildWifiStatusPayload(buf);
-        sendFrame(CMD_WIFI_STATUS, buf, n, src);
+        sendFrame(CMD_WIFI_STATUS, buf, n, route);
 
         if (src == TransportSource::USB) Serial.flush();
         delay(200);
@@ -1272,7 +1295,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
     case CMD_GET_VERSION: {
         const char* v = fwVersion.c_str();
-        sendFrame(CMD_VERSION_RESP, (const uint8_t*)v, (uint16_t)strlen(v), src);
+        sendFrame(CMD_VERSION_RESP, (const uint8_t*)v, (uint16_t)strlen(v), route);
         break;
     }
 
@@ -1289,12 +1312,12 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         memcpy(&buf[5],  &freeHeap, 4);
         memcpy(&buf[9],  &minHeap,  4);
         memcpy(&buf[13], &maxLoopUs, 4);
-        sendFrame(CMD_DEBUG_RESP, buf, sizeof(buf), src);
+        sendFrame(CMD_DEBUG_RESP, buf, sizeof(buf), route);
         break;
     }
 
     case CMD_PING: {
-        sendFrame(CMD_PONG, nullptr, 0, src);
+        sendFrame(CMD_PONG, nullptr, 0, route);
         break;
     }
 
@@ -1303,7 +1326,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // CMD_TX_REQUEST runs a CAD scan (with backoff retries)
         // before startTransmit. Setting persisted in LittleFS so
         // it survives modem reboot independent of the controller.
-        if (len < 1) { sendError(ERR_INVALID_CMD, src); break; }
+        if (len < 1) { sendError(ERR_INVALID_CMD, route); break; }
         bool on = payload[0] != 0;
         primaryRadioRuntime.cad.autoEnabled = on;
 #if defined(BOARD_HELTEC_T114)
@@ -1311,7 +1334,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #endif
         LOG_R_INFO("auto-CAD %s", on ? "ON" : "OFF");
         uint8_t status = 0;
-        sendFrame(CMD_SET_AUTO_CAD_RESP, &status, 1, src);
+        sendFrame(CMD_SET_AUTO_CAD_RESP, &status, 1, route);
         break;
     }
     case CMD_SET_DISPLAY_NAME: {
@@ -1327,7 +1350,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #endif
         LOG_R_INFO("display name → '%s'", buf);
         uint8_t status = 0;
-        sendFrame(CMD_SET_DISPLAY_NAME_RESP, &status, 1, src);
+        sendFrame(CMD_SET_DISPLAY_NAME_RESP, &status, 1, route);
         break;
     }
     case CMD_RADIO_STANDBY: {
@@ -1340,7 +1363,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #endif
         LOG_R_INFO("radio STANDBY");
         uint8_t status = 0;
-        sendFrame(CMD_RADIO_STANDBY_RESP, &status, 1, src);
+        sendFrame(CMD_RADIO_STANDBY_RESP, &status, 1, route);
         break;
     }
     case CMD_RADIO_RESUME: {
@@ -1352,7 +1375,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         bool ok = applyConfig(primaryRadioConfig.config()) && startReceive();
         LOG_R_INFO("radio RESUME (ok=%d)", (int)ok);
         uint8_t status = ok ? 0 : 1;
-        sendFrame(CMD_RADIO_RESUME_RESP, &status, 1, src);
+        sendFrame(CMD_RADIO_RESUME_RESP, &status, 1, route);
         break;
     }
     case CMD_ENTER_BOOTLOADER: {
@@ -1361,12 +1384,12 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // transition (GPREGRET 0x57), but let the BSP perform the shutdown and
         // reset sequence rather than writing GPREGRET directly. The tested RAK
         // bootloader exposes serial DFU, not a UF2 mass-storage disk.
-        sendFrame(CMD_PONG, nullptr, 0, src);
+        sendFrame(CMD_PONG, nullptr, 0, route);
         LOG_R_INFO("ENTER_BOOTLOADER requested — entering USB serial DFU bootloader");
         delay(100);
         BootloaderManager::enterUf2Dfu();
 #else
-        sendError(ERR_INVALID_CMD, src);
+        sendError(ERR_INVALID_CMD, route);
 #endif
         break;
     }
@@ -1381,31 +1404,31 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     case CMD_OTA_BEGIN: {
         LOG_R_WARN("OTA_BEGIN received — flash writer not implemented");
         uint8_t status = 3;   // unsupported
-        sendFrame(CMD_OTA_BEGIN_RESP, &status, 1, src);
+        sendFrame(CMD_OTA_BEGIN_RESP, &status, 1, route);
         break;
     }
     case CMD_OTA_CHUNK: {
         uint8_t status = 1;   // bad_offset (no session active)
-        sendFrame(CMD_OTA_CHUNK_RESP, &status, 1, src);
+        sendFrame(CMD_OTA_CHUNK_RESP, &status, 1, route);
         break;
     }
     case CMD_OTA_VERIFY: {
         uint8_t resp[1 + 32] = {1};   // 1 = no buffer; sha256 zeros
-        sendFrame(CMD_OTA_VERIFY_RESP, resp, sizeof(resp), src);
+        sendFrame(CMD_OTA_VERIFY_RESP, resp, sizeof(resp), route);
         break;
     }
     case CMD_OTA_APPLY: {
         uint8_t status = 1;
-        sendFrame(CMD_OTA_APPLY_RESP, &status, 1, src);
+        sendFrame(CMD_OTA_APPLY_RESP, &status, 1, route);
         break;
     }
     case CMD_OTA_ABORT: {
-        sendFrame(CMD_PONG, nullptr, 0, src);
+        sendFrame(CMD_PONG, nullptr, 0, route);
         break;
     }
 
     case CMD_WIFI_RESET: {
-        sendFrame(CMD_WIFI_RESET, nullptr, 0, src);
+        sendFrame(CMD_WIFI_RESET, nullptr, 0, route);
         if (src == TransportSource::USB) Serial.flush();
         delay(200);
         WifiManager::factoryReset();   // does not return
@@ -1413,18 +1436,15 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     default:
-        sendError(ERR_INVALID_CMD, src);
+        sendError(ERR_INVALID_CMD, route);
         break;
     }
 }
 
-// TCP ingress retains its immutable endpoint binding up to command dispatch.
-// Replies still use the legacy TransportSource::TCP singleton TCPServer::write;
-// this seam alone is NOT safe for a second listener or dual-radio routing.
+// Legacy USB/UART and W5100S ingress keep their single-transport route.
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                        TransportSource src, const TcpEndpointIdentity& endpoint) {
-    (void)endpoint;
-    processHostCommand(cmd, payload, len, src);
+                        TransportSource src) {
+    processHostCommand(cmd, payload, len, {src, nullptr});
 }
 
 // ─── Serial-side parser callbacks ───────────────────────────

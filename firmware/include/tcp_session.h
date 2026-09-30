@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frame_parser.h"
+#include "response_route.h"
 #include "tcp_endpoint_identity.h"
 #include <Arduino.h>
 #include <IPAddress.h>
@@ -21,6 +22,9 @@ public:
     bool hasClient();
     bool requiresAuth() const;
     String clientIP();
+    const TcpEndpointIdentity& endpoint() const { return endpoint_; }
+    ResponseRoute responseRoute() { return {TransportSource::TCP, this, generation_}; }
+    void writeForRoute(const uint8_t* data, size_t len, uint32_t generation);
     void write(const uint8_t* data, size_t len);
 
 private:
@@ -36,6 +40,7 @@ private:
     static TcpSession* feeding_;
 
     WiFiClient client_;
+    uint32_t generation_ = 0;
     uint32_t localIP_ = 0;
     String token_;
     bool authenticated_ = false;

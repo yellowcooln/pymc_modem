@@ -9,7 +9,7 @@ namespace ConfigPortal {bool active=false;int serviced=0;void begin(){active=tru
 #include "protocol.h"
 #include <vector>
 void processHostCommand(uint8_t,const uint8_t*,uint16_t,TransportSource){}
-void processHostCommand(uint8_t,const uint8_t*,uint16_t,TransportSource,const TcpEndpointIdentity&){}
+void processHostCommand(uint8_t,const uint8_t*,uint16_t,ResponseRoute){}
 void noteTransportFrameError(uint8_t){}
 #define CHECK(x) do{if(!(x)){std::cerr<<__LINE__<<": " #x "\n";return 1;}}while(0)
 // Feed actual wire frames through the public listener, not TcpSession internals.

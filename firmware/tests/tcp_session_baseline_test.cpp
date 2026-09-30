@@ -4,6 +4,7 @@
 #include "tcp_session.h"
 #include "frame_parser.h"
 #include "protocol.h"
+#include "response_route.h"
 #include <WiFi.h>
 #include <cassert>
 #include <cstdio>
@@ -19,14 +20,19 @@ struct Command {
     TransportSource source;
     uint8_t radio;
     uint8_t session;
+    ResponseRoute route;
 };
 static std::vector<Command> commands;
 static std::vector<uint8_t> parse_errors;
+std::vector<uint8_t>& fakeUartOutput();
+extern void sendFrame(uint8_t, const uint8_t*, uint16_t, ResponseRoute);
+extern void sendFrame(uint8_t, const uint8_t*, uint16_t, TransportSource);
+extern void sendError(uint8_t, ResponseRoute);
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                        TransportSource src, const TcpEndpointIdentity& endpoint) {
-    commands.push_back({cmd, std::vector<uint8_t>(payload, payload + len), src,
-                        endpoint.radio, endpoint.session});
+                        ResponseRoute route) {
+    commands.push_back({cmd, std::vector<uint8_t>(payload, payload + len), route.source,
+                        route.tcp->endpoint().radio, route.tcp->endpoint().session, route});
 }
 void noteTransportFrameError(uint8_t error) { parse_errors.push_back(error); }
 
@@ -268,12 +274,41 @@ static void testIndependentSessions() {
     assert(commands[1].source == TransportSource::TCP &&
            commands[1].radio == 1 && commands[1].session == 1);
 
+    // Commands from both authenticated sockets must not reply through the
+    // single-listener TCPServer::write alias (which points at neither here).
+    for (const auto& command : commands) {
+        sendFrame(CMD_PONG, nullptr, 0, command.route);
+    }
+    expectOutput(a, CMD_PONG);
+    expectOutput(b, CMD_PONG);
+    const uint8_t airtime[] = {0x11, 0x22, 0x33, 0x44};
+    sendFrame(CMD_TX_DONE, airtime, sizeof(airtime), commands[1].route);
+    sendError(ERR_INVALID_CONFIG, commands[0].route);
+    expectOutput(a, CMD_ERROR, {ERR_INVALID_CONFIG});
+    expectOutput(b, CMD_TX_DONE, {0x11, 0x22, 0x33, 0x44});
+    sendFrame(CMD_PONG, nullptr, 0, TransportSource::USB);
+    assert(Serial.output == frame(CMD_PONG));
+    Serial.output.clear();
+    sendFrame(CMD_PONG, nullptr, 0, TransportSource::UART);
+    assert(fakeUartOutput() == frame(CMD_PONG));
+    fakeUartOutput().clear();
+    assert(a->output.empty() && b->output.empty());
+
     first.invalidateInterface({192,168,1,10});
     assert(a->stopped && !first.isReady() && second.isReady());
     enqueue(b, frame(CMD_STATUS_REQ));
     second.service();
     assert(commands.size() == 3 && commands.back().id == CMD_STATUS_REQ);
     assert(commands.back().radio == 1 && commands.back().session == 1);
+    const ResponseRoute oldRoute = commands.back().route;
+    second.disconnect();
+    auto replacement = std::make_shared<fake_tcp::Socket>();
+    second.accept(WiFiClient(replacement));
+    enqueue(replacement, frame(CMD_AUTH, {'o','t','h','e','r'}));
+    second.service();
+    expectOutput(replacement, CMD_AUTH_OK);
+    sendFrame(CMD_TX_DONE, airtime, sizeof(airtime), oldRoute);
+    assert(replacement->output.empty()); // stale route must never target new socket
     second.disconnect();
 }
 

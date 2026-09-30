@@ -140,7 +140,7 @@ void sendError(int, int) { ++errors; }
 void sendFrame(int, const uint8_t*, int, int) { ++responses; }
 void delay(int) { ++sleeps; }
 void configure(const uint8_t* payload, int len) {
-    int src = 0;
+    int route = 0;
     switch (CMD_SET_CAD_PARAMS) {
     case CMD_SET_CAD_PARAMS: {''' + setter + '''
     }

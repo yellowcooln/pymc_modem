@@ -4,8 +4,7 @@
 #include <cstring>
 
 extern void processHostCommand(uint8_t cmd, const uint8_t* payload,
-                               uint16_t len, TransportSource src,
-                               const TcpEndpointIdentity& endpoint);
+                               uint16_t len, ResponseRoute route);
 extern void noteTransportFrameError(uint8_t err_code);
 
 TcpSession* TcpSession::feeding_ = nullptr;
@@ -32,6 +31,7 @@ void TcpSession::accept(WiFiClient incoming) {
 }
 
 void TcpSession::disconnect() {
+    ++generation_; // invalidate every response route from the previous socket
     if (client_) {
         Serial.printf("[TCP] disconnect client %s auth=%u frames=%lu\n",
                       client_.remoteIP().toString().c_str(),
@@ -51,6 +51,10 @@ void TcpSession::invalidateInterface(const IPAddress& address) {
 
 void TcpSession::write(const uint8_t* data, size_t len) {
     if (connected()) client_.write(data, len);
+}
+
+void TcpSession::writeForRoute(const uint8_t* data, size_t len, uint32_t generation) {
+    if (generation == generation_ && isReady()) write(data, len);
 }
 
 void TcpSession::sendFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
@@ -95,7 +99,7 @@ void TcpSession::onFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
         sendFrame(CMD_AUTH_OK, nullptr, 0);
         return;
     }
-    processHostCommand(cmd, payload, len, TransportSource::TCP, endpoint_);
+    processHostCommand(cmd, payload, len, responseRoute());
 }
 
 void TcpSession::onError(uint8_t err) {
