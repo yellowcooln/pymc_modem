@@ -1,6 +1,7 @@
 // Host contract: compile the real tcp_server.cpp and frame_parser.cpp against
 // in-memory socket/Arduino shims; only main.cpp command/error hooks are faked.
 #include "tcp_server.h"
+#include "tcp_session.h"
 #include "frame_parser.h"
 #include "protocol.h"
 #include <WiFi.h>
@@ -224,6 +225,46 @@ static void testNonLanRejectedBeforeParsing() {
     assert(TCPServer::isClientReady() && commands.size() == 1);
 }
 
+static void testIndependentSessions() {
+    commands.clear();
+    parse_errors.clear();
+    TcpSession first, second;
+    first.configure(String("secret"));
+    second.configure(String("other"));
+    auto a = std::make_shared<fake_tcp::Socket>();
+    auto b = std::make_shared<fake_tcp::Socket>();
+    b->remote = {10, 0, 0, 2};
+    b->local = {10, 0, 0, 10};
+    first.accept(WiFiClient(a));
+    second.accept(WiFiClient(b));
+
+    const auto auth = frame(CMD_AUTH, {'s','e','c','r','e','t'});
+    enqueue(a, std::vector<uint8_t>(auth.begin(), auth.begin() + 3));
+    first.service();
+    enqueue(b, frame(CMD_AUTH, {'o','t','h','e','r'}));
+    second.service();
+    expectOutput(b, CMD_AUTH_OK);
+    assert(second.isReady() && !first.isReady());
+
+    enqueue(a, std::vector<uint8_t>(auth.begin() + 3, auth.end()));
+    first.service();
+    expectOutput(a, CMD_AUTH_OK);
+    assert(first.isReady() && second.isReady());
+    enqueue(a, frame(CMD_PING));
+    enqueue(b, frame(CMD_GET_CONFIG));
+    first.service();
+    second.service();
+    assert(commands.size() == 2 && commands[0].id == CMD_PING &&
+           commands[1].id == CMD_GET_CONFIG);
+
+    first.invalidateInterface({192,168,1,10});
+    assert(a->stopped && !first.isReady() && second.isReady());
+    enqueue(b, frame(CMD_STATUS_REQ));
+    second.service();
+    assert(commands.size() == 3 && commands.back().id == CMD_STATUS_REQ);
+    second.disconnect();
+}
+
 int main() {
     testAuthGateAndResponses();
     testParsingAndFairness();
@@ -231,6 +272,7 @@ int main() {
     testPartialFrameAndSingleClientOwnership();
     testPartialAuthCannotCrossReconnect();
     testNonLanRejectedBeforeParsing();
+    testIndependentSessions();
     TCPServer::end();
-    std::puts("TCP production session baseline: PASS (6 scenarios)");
+    std::puts("TCP production session baseline: PASS (7 scenarios)");
 }

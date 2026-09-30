@@ -21,6 +21,7 @@ def main() -> int:
             f"-I{firmware / 'tests' / 'tcp_stubs'}", f"-I{firmware / 'include'}",
             str(firmware / "tests" / "tcp_session_baseline_test.cpp"),
             str(firmware / "src" / "tcp_server.cpp"),
+            str(firmware / "src" / "tcp_session.cpp"),
             str(firmware / "src" / "frame_parser.cpp"),
             "-o", str(executable),
         ], check=True)
