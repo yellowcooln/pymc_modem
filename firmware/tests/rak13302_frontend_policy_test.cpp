@@ -23,13 +23,46 @@ struct Gpio {
 };
 
 int main() {
+    // Same numeric ID must not let an impostor clear the owner's TX grant.
+    {
+        Gpio ownerGpio, duplicateGpio, peerGpio;
+        TxArbiter shared;
+        FrontEnd<Gpio> owner(0, 27, ownerGpio, shared);
+        FrontEnd<Gpio> duplicate(0, 19, duplicateGpio, shared);
+        FrontEnd<Gpio> peer(1, 19, peerGpio, shared);
+        assert(owner.begin() && peer.begin());
+        assert(owner.begin() && ownerGpio.writes.size() == 1); // idempotent
+        assert(!duplicate.begin() && duplicateGpio.writes.empty());
+        assert(owner.setSupplyReady(true) && peer.setSupplyReady(true));
+        assert(owner.transmit() && shared.owner() == 0);
+        assert(!duplicate.shutdown() && !duplicate.finishTransmit());
+        assert(shared.owner() == 0 && !peer.transmit());
+        assert(owner.finishTransmit() && shared.owner() == -1);
+        assert(peer.transmit() && peer.finishTransmit());
+    }
+    // A controller destroyed while granted cannot silently free the interlock.
+    {
+        TxArbiter shared;
+        Gpio a, b;
+        FrontEnd<Gpio> peer(1, 19, b, shared);
+        assert(peer.begin() && peer.setSupplyReady(true));
+        {
+            FrontEnd<Gpio> abandoned(0, 27, a, shared);
+            assert(abandoned.begin() && abandoned.setSupplyReady(true));
+            assert(abandoned.transmit());
+        }
+        FrontEnd<Gpio> replacement(0, 27, a, shared);
+        assert(!replacement.begin() && !peer.transmit());
+        assert(shared.owner() == 0);
+    }
+    {
     Gpio a, b;
     TxArbiter arbiter;
     FrontEnd<Gpio> first(0, 27, a, arbiter), second(1, 19, b, arbiter);
     assert(!first.receive() && !first.transmit());
     assert(!first.setSupplyReady(true));
     assert(first.begin() && second.begin());
-    assert(!first.begin() && first.state() == State::Off);
+    assert(first.begin() && first.state() == State::Off);
     assert(a.writes.size() == 1 && !a.writes[0].level);
     assert(b.writes.size() == 1 && !b.writes[0].level);
     assert(!first.transmit() && !second.receive()); // rail unverified
@@ -58,8 +91,11 @@ int main() {
     assert(first.setSupplyReady(false) && !first.receive());
     for (auto w : a.writes) assert(w.pin == 27);
     for (auto w : b.writes) assert(w.pin == 19);
+    }
 
     // Invalid ID/pin and failed initialization never touch a pin or grant TX.
+    {
+    TxArbiter arbiter;
     Gpio bad;
     FrontEnd<Gpio> invalidId(2, 27, bad, arbiter), invalidPin(0, -1, bad, arbiter);
     FrontEnd<Gpio> unowned(1, 99, bad, arbiter);
@@ -69,8 +105,13 @@ int main() {
     FrontEnd<Gpio> failedBegin(0, 27, bad, arbiter);
     assert(!failedBegin.begin() && !failedBegin.setSupplyReady(true));
     assert(bad.writes.empty());
+    bad.failConfigure = false;
+    assert(failedBegin.begin()); // failed registration/configuration is retryable
+    }
 
     // Failed HIGH: attempt LOW and release only if LOW succeeds.
+    {
+    TxArbiter arbiter;
     Gpio c, d;
     FrontEnd<Gpio> third(0, 27, c, arbiter), fourth(1, 19, d, arbiter);
     assert(third.begin() && fourth.begin());
@@ -93,7 +134,12 @@ int main() {
     assert(third.shutdown() && arbiter.owner() == -1);
     assert(third.setSupplyReady(true) && fourth.transmit());
     assert(fourth.finishTransmit() && fourth.shutdown());
+    }
     // Failed HIGH and LOW together also retains the grant.
+    TxArbiter arbiter;
+    Gpio d;
+    FrontEnd<Gpio> fourth(1, 19, d, arbiter);
+    assert(fourth.begin() && fourth.setSupplyReady(true));
     struct FailBoth : Gpio {
         bool failAll = false;
         bool write(int pin, bool level) {

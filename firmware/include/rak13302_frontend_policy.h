@@ -24,16 +24,34 @@ public:
 
 private:
     template <class Gpio> friend class FrontEnd;
-    bool acquire(uint8_t radio) {
-        if (radio >= 2 || owner_ != -1) return false;
+    bool registerController(uint8_t radio, const void* controller) {
+        if (radio >= 2 || registered_[radio]) return false;
+        registered_[radio] = controller;
+        return true;
+    }
+    void unregisterController(uint8_t radio, const void* controller) {
+        // An abandoned active grant must remain latched (fail closed).
+        if (radio < 2 && registered_[radio] == controller && ownerToken_ != controller)
+            registered_[radio] = nullptr;
+    }
+    bool owns(uint8_t radio, const void* controller) const {
+        return radio < 2 && owner_ == radio && ownerToken_ == controller &&
+               registered_[radio] == controller;
+    }
+    bool acquire(uint8_t radio, const void* controller) {
+        if (radio >= 2 || registered_[radio] != controller || owner_ != -1) return false;
         owner_ = radio;
+        ownerToken_ = controller;
         return true;
     }
-    bool release(uint8_t radio) {
-        if (radio >= 2 || owner_ != radio) return false;
+    bool release(uint8_t radio, const void* controller) {
+        if (!owns(radio, controller)) return false;
         owner_ = -1;
+        ownerToken_ = nullptr;
         return true;
     }
+    const void* registered_[2] = {nullptr, nullptr};
+    const void* ownerToken_ = nullptr;
     int owner_ = -1;
 };
 
@@ -48,10 +66,16 @@ public:
         : radio_(radio), pin_(antSwPin), gpio_(gpio), arbiter_(arbiter) {}
     FrontEnd(const FrontEnd&) = delete;
     FrontEnd& operator=(const FrontEnd&) = delete;
+    ~FrontEnd() { if (initialized_) arbiter_.unregisterController(radio_, this); }
 
     bool begin() {
-        if (initialized_ || radio_ >= 2 || pin_ < 0 || !gpio_.valid(pin_)) return false;
-        if (!gpio_.configureLow(pin_)) return false;
+        if (initialized_) return true;
+        if (radio_ >= 2 || pin_ < 0 || !gpio_.valid(pin_) ||
+            !arbiter_.registerController(radio_, this)) return false;
+        if (!gpio_.configureLow(pin_)) {
+            arbiter_.unregisterController(radio_, this);
+            return false;
+        }
         initialized_ = true;
         state_ = State::Off;
         return true;
@@ -86,7 +110,7 @@ public:
 
     bool transmit() {
         if (!initialized_ || !supplyReady_ || state_ == State::Fault ||
-            state_ == State::Transmit || !arbiter_.acquire(radio_)) return false;
+            state_ == State::Transmit || !arbiter_.acquire(radio_, this)) return false;
         if (!gpio_.write(pin_, true)) return failHigh();
         state_ = State::Transmit;
         txActive_ = true;
@@ -97,11 +121,11 @@ public:
     // the SX1262 can no longer transmit. This method does not stop the radio.
     // On a healthy supply RX keeps ANT_SW HIGH; after supply loss drive LOW.
     bool finishTransmit() {
-        if (!initialized_ || !txActive_ || arbiter_.owner() != radio_) return false;
+        if (!initialized_ || !txActive_ || !arbiter_.owns(radio_, this)) return false;
         txActive_ = false; // failed LOW may now be retried via shutdown()
         if (!supplyReady_ || state_ == State::Fault) return shutdown();
         state_ = State::Receive;
-        return arbiter_.release(radio_);
+        return arbiter_.release(radio_, this);
     }
 
     // Normal shutdown cannot stop an active SX1262 TX. Never relinquish TX
@@ -113,7 +137,7 @@ public:
             return false;
         }
         state_ = State::Off;
-        if (arbiter_.owner() == radio_) arbiter_.release(radio_);
+        if (arbiter_.owns(radio_, this)) arbiter_.release(radio_, this);
         return true;
     }
 
