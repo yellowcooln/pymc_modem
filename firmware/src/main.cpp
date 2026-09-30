@@ -18,6 +18,7 @@
 #include "radio_config_application.h"
 #include "radio_runtime_state.h"
 #include "radio_command_context.h"
+#include "radio_rx_owner.h"
 #include "board_config.h"
 #include "radio_hardware.h"
 #include "radio_initialization.h"
@@ -852,60 +853,24 @@ bool applyConfig(RadioHardware& hardware, RadioConfigState& config,
 }
 
 bool startReceive() {
-    // Hard standby blocks every code path that would put the
-    // radio into RX. The flag is cleared by CMD_RADIO_RESUME
-    // which re-runs applyConfig() and then calls this function
-    // again with standby=false.
-    if (!primaryRadioRuntime.receiveAllowed()) return true;
-    RFFrontEnd::prepareReceive();
-    return radio.startReceive() == RADIOLIB_ERR_NONE;
+    // Only the primary owns the singleton RF front end. Do not attach a
+    // secondary RX listener until front-end and TX/IRQ ownership are isolated.
+    return startRadioReceive(primaryRadioHardware, primaryRadioRuntime,
+                             [] { RFFrontEnd::prepareReceive(); });
 }
 
 // ─── Handle received LoRa packet ────────────────────────────
 void handleLoRaRx() {
-    int len = radio.getPacketLength();
-    if (len <= 0 || len > MAX_LORA_PAYLOAD) {
-        startReceive();
-        return;
-    }
-
-    uint8_t rxBuf[MAX_LORA_PAYLOAD];
-    int state = radio.readData(rxBuf, len);
-    if (state != RADIOLIB_ERR_NONE) {
-        status.crc_errors++;
-        startReceive();
-        return;
-    }
-
-    int16_t rssi = (int16_t)radio.getRSSI();
-    int16_t snr  = (int16_t)(radio.getSNR() * 10.0f);
-    int16_t signal_rssi = rssi;
-
-    status.rx_count++;
-    status.last_rssi = rssi;
-    status.last_snr  = snr;
-
-    // TFT cache — display the freshest received-packet quality
-    // alongside the rest of the radio state on the next status
-    // refresh. Config fields stay at whatever applyConfig set.
-    oled.setRadioInfo(primaryRadioConfig.config().freq_hz, primaryRadioConfig.config().sf,
-                     primaryRadioConfig.config().bandwidth_hz, primaryRadioConfig.config().cr,
-                     primaryRadioConfig.config().power_dbm,
-                     rssi, snr);
-
-    uint8_t rxPayload[6 + MAX_LORA_PAYLOAD];
-    rxPayload[0] = rssi & 0xFF;
-    rxPayload[1] = (rssi >> 8) & 0xFF;
-    rxPayload[2] = snr & 0xFF;
-    rxPayload[3] = (snr >> 8) & 0xFF;
-    rxPayload[4] = signal_rssi & 0xFF;
-    rxPayload[5] = (signal_rssi >> 8) & 0xFF;
-    memcpy(rxPayload + 6, rxBuf, len);
-
-    constexpr uint8_t primaryRadioEndpoint = 0;
-    broadcastFrame(CMD_RX_PACKET, rxPayload, 6 + len, primaryRadioEndpoint);
-    primaryRadioRuntime.noise.recordPacket(millis());
-    startReceive();
+    RadioCommandContext owner{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
+    handleRadioRx(primaryRadioHardware, owner,
+        [] { RFFrontEnd::prepareReceive(); },
+        [](const RadioConfig& cfg, int16_t rssi, int16_t snr) {
+            oled.setRadioInfo(cfg.freq_hz, cfg.sf, cfg.bandwidth_hz, cfg.cr,
+                              cfg.power_dbm, rssi, snr);
+        },
+        [](uint8_t cmd, const uint8_t* payload, uint16_t len, uint8_t origin) {
+            broadcastFrame(cmd, payload, len, origin);
+        }, [] { return millis(); });
 }
 
 // ─── Endpoint-owned radio queries ───────────────────────────
