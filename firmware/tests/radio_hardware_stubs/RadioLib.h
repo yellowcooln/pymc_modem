@@ -6,6 +6,7 @@
 #define RADIOLIB_IRQ_RX_DEFAULT_MASK 3UL
 #define RADIOLIB_IRQ_PREAMBLE_DETECTED 4
 #define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_NC 0xFFFFFFFFUL
 struct Module {
     int cs, irq, rst, busy;
     SPIClass* spi;

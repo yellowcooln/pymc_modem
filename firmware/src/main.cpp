@@ -18,6 +18,7 @@
 #include "radio_runtime_state.h"
 #include "board_config.h"
 #include "radio_hardware.h"
+#include "radio_initialization.h"
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
 #include "frame_parser.h"
@@ -573,47 +574,6 @@ static void configureStaticGpios() {
         digitalWrite(gpio.pin, gpio.level_high ? HIGH : LOW);
     }
     RFFrontEnd::begin();
-}
-
-static void rfSwitchConfigureRadio() {
-    // DIO2 + explicit RX/TX pins are independent — the Wio-SX1262 board uses
-    // both: DIO2 drives the TX path internally while RXEN (an external GPIO)
-    // gates the LNA on the RX path. Older boards (Heltec V3 / T3S3 / RAK3112)
-    // only set dio2_as_rf_switch and leave rx_pin/tx_pin == -1, so the second
-    // call becomes a no-op for them.
-    if (BOARD.rf_switch.dio2_as_rf_switch) {
-        int state = radio.setDio2AsRfSwitch(true);
-        Serial.printf("[INFO] setDio2AsRfSwitch(true) -> %d\n", state);
-    }
-    if (BOARD.rf_switch.rx_pin >= 0 || BOARD.rf_switch.tx_pin >= 0) {
-        uint32_t rx = BOARD.rf_switch.rx_pin >= 0
-                          ? (uint32_t)BOARD.rf_switch.rx_pin
-                          : RADIOLIB_NC;
-        uint32_t tx = BOARD.rf_switch.tx_pin >= 0
-                          ? (uint32_t)BOARD.rf_switch.tx_pin
-                          : RADIOLIB_NC;
-        radio.setRfSwitchPins(rx, tx);
-        Serial.printf("[INFO] setRfSwitchPins(rx=%lu tx=%lu)\n",
-                      (unsigned long)rx, (unsigned long)tx);
-    }
-}
-
-static void configureBoardRadioOptions() {
-    if (BOARD.sx126x_current_limit_ma > 0) {
-        int state = radio.setCurrentLimit(BOARD.sx126x_current_limit_ma);
-        Serial.printf("[INFO] setCurrentLimit(%d mA) -> %d\n",
-                      (int)BOARD.sx126x_current_limit_ma, state);
-    }
-
-    if (BOARD.sx126x_rx_boosted_gain) {
-        int state = radio.setRxBoostedGainMode(true);
-        Serial.printf("[INFO] setRxBoostedGainMode(true) -> %d\n", state);
-    }
-
-    if (BOARD.sx126x_register_patch) {
-        int state = radio.applyRegisterPatch08B5();
-        Serial.printf("[INFO] SX126x register patch 0x08B5 -> %d\n", state);
-    }
 }
 
 // ─── Frame output ────────────────────────────────────────────
@@ -1633,8 +1593,8 @@ void setup() {
             Serial.println("[BOOT] SX1262 init failed — continuing with Wi-Fi/config portal only");
             primaryRadioRuntime.ready = false;
         } else {
-        rfSwitchConfigureRadio();
-        configureBoardRadioOptions();
+        configureRadioRfSwitch(primaryRadioHardware.radio, BOARD.rf_switch, Serial);
+        configureRadioSx126xOptions(primaryRadioHardware.radio, BOARD, Serial);
 
         if (!applyConfig(primaryRadioConfig.config())) {
             oled.showError("Config fail!");
