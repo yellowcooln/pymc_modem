@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include "legacy_rak4631_build_flags.h"
 #include "protocol.h"
+#include "radio_config_state.h"
 #include "board_config.h"
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
@@ -333,16 +334,9 @@ OpenHopSX1262 radio = new Module(BOARD.pin_lora_nss, BOARD.pin_lora_dio1,
 // defined above so call sites compile unchanged.
 OledDisplay oled;
 
-// ─── Default config: EU/UK (Narrow), Switzerland preset ──────
-static RadioConfig currentConfig = {
-    .freq_hz      = 869618000,
-    .bandwidth_hz = 62500,
-    .sf           = 8,
-    .cr           = 8,
-    .power_dbm    = 22,
-    .syncword     = 0x12,
-    .preamble_len = 16
-};
+// One state instance for the current single-radio firmware. Future radios
+// can own separate instances without changing the wire format.
+static RadioConfigState primaryRadioConfig;
 
 static StatusResp  status        = {};
 // Hard-standby flag set by CMD_RADIO_STANDBY. While true, loop()
@@ -508,7 +502,7 @@ Snapshot capture() {
         compatReadCpuTemperature());
     snap.status.noise_floor_x10 = (int16_t)(noiseFloor * 10.0f);
     snap.status.battery_mv = BatteryMonitor::readMilliVolts(BOARD.battery);
-    snap.radio = currentConfig;
+    snap.radio = primaryRadioConfig.config();
     snap.firmwareVersion = fwVersion;
     snap.radioStandby = radioStandby;
     snap.autoCadEnabled = autoCadEnabled;
@@ -976,9 +970,9 @@ void handleLoRaRx() {
     // TFT cache — display the freshest received-packet quality
     // alongside the rest of the radio state on the next status
     // refresh. Config fields stay at whatever applyConfig set.
-    oled.setRadioInfo(currentConfig.freq_hz, currentConfig.sf,
-                     currentConfig.bandwidth_hz, currentConfig.cr,
-                     currentConfig.power_dbm,
+    oled.setRadioInfo(primaryRadioConfig.config().freq_hz, primaryRadioConfig.config().sf,
+                     primaryRadioConfig.config().bandwidth_hz, primaryRadioConfig.config().cr,
+                     primaryRadioConfig.config().power_dbm,
                      rssi, snr);
 
     uint8_t rxPayload[6 + MAX_LORA_PAYLOAD];
@@ -1185,7 +1179,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                       (unsigned)len, (unsigned long)(dio1IrqCount - irqStart));
             radio.standby();
             delay(5);
-            applyConfig(currentConfig);
+            applyConfig(primaryRadioConfig.config());
             sendError(ERR_TX_TIMEOUT, src);
         }
         startReceive();
@@ -1256,7 +1250,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             LOG_R_WARN("CAD IRQ timeout — resetting radio");
             radio.standby();
             delay(5);
-            applyConfig(currentConfig);
+            applyConfig(primaryRadioConfig.config());
             dio1Flag = false;
             sendError(ERR_CAD_FAILED, src);
             startReceive();
@@ -1306,21 +1300,20 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_SET_CONFIG: {
-        if (len != sizeof(RadioConfig)) {
+        if (!primaryRadioConfig.setFromWire(payload, len)) {
             sendError(ERR_INVALID_CONFIG, src);
             break;
         }
-        memcpy(&currentConfig, payload, sizeof(RadioConfig));
         LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s freq=%lu bw=%lu sf=%u cr=%u pwr_req=%d sync=0x%04X pre=%u",
                    (unsigned)src, BOARD.name, fwVersion.c_str(),
-                   (unsigned long)currentConfig.freq_hz,
-                   (unsigned long)currentConfig.bandwidth_hz,
-                   (unsigned)currentConfig.sf, (unsigned)currentConfig.cr,
-                   (int)currentConfig.power_dbm,
-                   (unsigned)currentConfig.syncword,
-                   (unsigned)currentConfig.preamble_len);
-        if (applyConfig(currentConfig)) {
-            sendFrame(CMD_CONFIG_RESP, (uint8_t*)&currentConfig, sizeof(RadioConfig), src);
+                   (unsigned long)primaryRadioConfig.config().freq_hz,
+                   (unsigned long)primaryRadioConfig.config().bandwidth_hz,
+                   (unsigned)primaryRadioConfig.config().sf, (unsigned)primaryRadioConfig.config().cr,
+                   (int)primaryRadioConfig.config().power_dbm,
+                   (unsigned)primaryRadioConfig.config().syncword,
+                   (unsigned)primaryRadioConfig.config().preamble_len);
+        if (applyConfig(primaryRadioConfig.config())) {
+            sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), src);
             startReceive();
         } else {
             sendError(ERR_INVALID_CONFIG, src);
@@ -1329,7 +1322,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_GET_CONFIG: {
-        sendFrame(CMD_CONFIG_RESP, (uint8_t*)&currentConfig, sizeof(RadioConfig), src);
+        sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), src);
         break;
     }
 
@@ -1461,7 +1454,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #if defined(BOARD_HELTEC_T114)
         NodeState::setStandby(false);
 #endif
-        bool ok = applyConfig(currentConfig) && startReceive();
+        bool ok = applyConfig(primaryRadioConfig.config()) && startReceive();
         LOG_R_INFO("radio RESUME (ok=%d)", (int)ok);
         uint8_t status = ok ? 0 : 1;
         sendFrame(CMD_RADIO_RESUME_RESP, &status, 1, src);
@@ -1731,7 +1724,7 @@ void setup() {
         rfSwitchConfigureRadio();
         configureBoardRadioOptions();
 
-        if (!applyConfig(currentConfig)) {
+        if (!applyConfig(primaryRadioConfig.config())) {
             oled.showError("Config fail!");
             sendError(ERR_INVALID_CONFIG, TransportSource::USB);
             while (true) delay(1000);
@@ -2142,13 +2135,13 @@ void loop() {
                 oled.showStatus(status.rx_count, status.tx_count,
                                 ssid, ip, stateTag, fwVersion.c_str(), batteryMv);
             } else if (currentScreen == Screen::RADIO) {
-                oled.showRadioConfig(currentConfig.freq_hz,
-                                     currentConfig.bandwidth_hz,
-                                     currentConfig.sf,
-                                     currentConfig.cr,
-                                     currentConfig.power_dbm,
-                                     currentConfig.syncword,
-                                     currentConfig.preamble_len,
+                oled.showRadioConfig(primaryRadioConfig.config().freq_hz,
+                                     primaryRadioConfig.config().bandwidth_hz,
+                                     primaryRadioConfig.config().sf,
+                                     primaryRadioConfig.config().cr,
+                                     primaryRadioConfig.config().power_dbm,
+                                     primaryRadioConfig.config().syncword,
+                                     primaryRadioConfig.config().preamble_len,
                                      fwVersion.c_str());
             } else {  // Screen::DIAGNOSTICS
                 uint32_t uptime = millis() / 1000;
