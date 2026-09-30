@@ -961,7 +961,8 @@ static bool rejectUnownedCommand(uint8_t cmd, ResponseRoute route,
 #ifdef ARDUINO_ARCH_ESP32
     if (route.tcp) {
         const TcpEndpointIdentity& endpoint = route.tcp->endpoint();
-        if (route.source != TransportSource::TCP || endpoint.radio != owner.radioId) {
+        if (route.source != TransportSource::TCP || endpoint.radio != owner.radioId ||
+            endpoint.session != owner.sessionId) {
             sendError(ERR_INVALID_CMD, route);
             return true;
         }
@@ -1498,7 +1499,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                         ResponseRoute route) {
-    RadioCommandContext primary{0, primaryRadioConfig, primaryRadioRuntime, status};
+    RadioCommandContext primary{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
     // No second physical command owner is installed yet. In particular a
     // forged/unrecognized endpoint must never fall through to radio 0.
 #ifdef ARDUINO_ARCH_ESP32
