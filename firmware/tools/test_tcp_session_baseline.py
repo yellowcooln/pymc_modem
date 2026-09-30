@@ -6,6 +6,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -55,15 +56,46 @@ static bool uartEnabled = true;
         ], check=True)
         subprocess.run([str(executable)], check=True)
 
-        # Recompile the same extracted production encoder without ESP32 so the
-        # W5100S TCPServer::write path is exercised with an ungated raw queue.
+        # Bind production W5100S readiness and token-policy definitions to
+        # recording socket/IP shims; raw write intentionally remains ungated.
+        ethernet_source = (firmware / "src" / "w5100s_ethernet_transport.cpp").read_text()
+        auth_start = ethernet_source.index("    static bool requiresAuth() {", ethernet_source.index("namespace TCPServer {"))
+        auth_end = ethernet_source.index("\n    }", auth_start) + len("\n    }")
+        ready_start = ethernet_source.index("    bool isClientReady() {", auth_end)
+        ready_end = ethernet_source.index("\n    }", ready_start) + len("\n    }")
+        auth = ethernet_source[auth_start:auth_end]
+        readiness = ethernet_source[ready_start:ready_end]
+        assert "requiredToken.length()" in auth
+        assert "EthernetManager::hasIP()" in readiness
+        assert "socketReader.connected()" in readiness
+        assert "requiresAuth()" in readiness
+        w5100s = pathlib.Path(directory) / "production_w5100s_readiness.cpp"
+        w5100s.write_text('''#include "tcp_server.h"
+namespace EthernetManager { bool hasIP(); }
+namespace TCPServer {
+struct FakeClient { explicit operator bool() const; };
+struct FakeSocketReader { bool connected() const; };
+extern FakeClient client;
+extern FakeSocketReader socketReader;
+extern String requiredToken;
+extern bool authenticated;
+''' + auth + '\n' + readiness + '\n} // namespace TCPServer\n')
+        nrf_output = output
+        if "--probe-broken-broadcast" in sys.argv:
+            # Mutation probe: ungate just the copied nRF broadcast expression.
+            broken = main_source[start:end].replace(
+                "/*toTCP=*/TCPServer::isClientReady(),",
+                "/*toTCP=*/true,", 1)
+            assert broken != main_source[start:end]
+            nrf_output = pathlib.Path(directory) / "broken_frame_output.cpp"
+            nrf_output.write_text(output.read_text().replace(main_source[start:end], broken))
         nrf_executable = pathlib.Path(directory) / "nrf_broadcast_auth_test"
         subprocess.run([
             compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-function", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             f"-I{firmware / 'tests' / 'tcp_stubs'}", f"-I{firmware / 'include'}",
             str(firmware / "tests" / "nrf_broadcast_auth_test.cpp"),
-            str(output), "-o", str(nrf_executable),
+            str(nrf_output), str(w5100s), "-o", str(nrf_executable),
         ], check=True)
         subprocess.run([str(nrf_executable)], check=True)
     return 0
