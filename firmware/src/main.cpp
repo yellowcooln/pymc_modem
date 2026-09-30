@@ -1847,8 +1847,9 @@ void sampleNoiseFloor() {
     // For ambient/noise telemetry we must read instantaneous RSSI instead;
     // otherwise a strong RX packet can pin the reported noise floor around
     // that packet's RSSI until another radio state transition clears it.
+    const uint32_t sampleStartedAt = millis();
     float instRssi = radio.getRSSI(false);
-    primaryRadioRuntime.noise.sample(instRssi, millis());
+    primaryRadioRuntime.noise.sample(instRssi, sampleStartedAt);
 }
 
 void maybeResetAgc() {

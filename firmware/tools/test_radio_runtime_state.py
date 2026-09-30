@@ -65,7 +65,8 @@ uint32_t millis() { return clockMs; }
 struct RecordingRadio {
     int reads = 0;
     float rssi = -100.0f;
-    float getRSSI(bool lastPacket) { assert(!lastPacket); ++reads; return rssi; }
+    uint32_t readDelayMs = 0;
+    float getRSSI(bool lastPacket) { assert(!lastPacket); ++reads; clockMs += readDelayMs; return rssi; }
 } radio;
 void sampleNoiseFloor() {''' + sampler + '''\n}
 int main() {
@@ -95,6 +96,15 @@ int main() {
     sampleNoiseFloor();
     assert(radio.reads == 21);
     assert(primaryRadioRuntime.noise.floorX10() == -1000);
+    // A slow SPI RSSI read must not move the sample timestamp forward.
+    primaryRadioRuntime.noise = RadioRuntimeState::NoiseState{};
+    radio.reads = 0;
+    radio.readDelayMs = 5;
+    clockMs = 500;
+    sampleNoiseFloor();
+    clockMs = 510;
+    sampleNoiseFloor();
+    assert(radio.reads == 2);
 }
 ''')
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
