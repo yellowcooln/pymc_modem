@@ -7,7 +7,7 @@
 namespace TCPServer {
 
 static WiFiServer* server = nullptr;
-static TcpSession session;
+static TcpSession session(TcpEndpointIdentity{0, 0});
 static uint32_t acceptedCount = 0;
 
 void begin(uint16_t port, const String& token) {

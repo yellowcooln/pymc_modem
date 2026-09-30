@@ -4,7 +4,8 @@
 #include <cstring>
 
 extern void processHostCommand(uint8_t cmd, const uint8_t* payload,
-                               uint16_t len, TransportSource src);
+                               uint16_t len, TransportSource src,
+                               const TcpEndpointIdentity& endpoint);
 extern void noteTransportFrameError(uint8_t err_code);
 
 TcpSession* TcpSession::feeding_ = nullptr;
@@ -94,7 +95,7 @@ void TcpSession::onFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
         sendFrame(CMD_AUTH_OK, nullptr, 0);
         return;
     }
-    processHostCommand(cmd, payload, len, TransportSource::TCP);
+    processHostCommand(cmd, payload, len, TransportSource::TCP, endpoint_);
 }
 
 void TcpSession::onError(uint8_t err) {

@@ -7,19 +7,26 @@
 #include <WiFi.h>
 #include <cassert>
 #include <cstdio>
+#include <type_traits>
 #include <vector>
+
+static_assert(!std::is_assignable<TcpEndpointIdentity&, TcpEndpointIdentity>::value,
+              "endpoint identity must not be mutable after binding");
 
 struct Command {
     uint8_t id;
     std::vector<uint8_t> payload;
     TransportSource source;
+    uint8_t radio;
+    uint8_t session;
 };
 static std::vector<Command> commands;
 static std::vector<uint8_t> parse_errors;
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                        TransportSource src) {
-    commands.push_back({cmd, std::vector<uint8_t>(payload, payload + len), src});
+                        TransportSource src, const TcpEndpointIdentity& endpoint) {
+    commands.push_back({cmd, std::vector<uint8_t>(payload, payload + len), src,
+                        endpoint.radio, endpoint.session});
 }
 void noteTransportFrameError(uint8_t error) { parse_errors.push_back(error); }
 
@@ -228,7 +235,7 @@ static void testNonLanRejectedBeforeParsing() {
 static void testIndependentSessions() {
     commands.clear();
     parse_errors.clear();
-    TcpSession first, second;
+    TcpSession first(TcpEndpointIdentity{0, 0}), second(TcpEndpointIdentity{1, 1});
     first.configure(String("secret"));
     second.configure(String("other"));
     auto a = std::make_shared<fake_tcp::Socket>();
@@ -256,12 +263,17 @@ static void testIndependentSessions() {
     second.service();
     assert(commands.size() == 2 && commands[0].id == CMD_PING &&
            commands[1].id == CMD_GET_CONFIG);
+    assert(commands[0].source == TransportSource::TCP &&
+           commands[0].radio == 0 && commands[0].session == 0);
+    assert(commands[1].source == TransportSource::TCP &&
+           commands[1].radio == 1 && commands[1].session == 1);
 
     first.invalidateInterface({192,168,1,10});
     assert(a->stopped && !first.isReady() && second.isReady());
     enqueue(b, frame(CMD_STATUS_REQ));
     second.service();
     assert(commands.size() == 3 && commands.back().id == CMD_STATUS_REQ);
+    assert(commands.back().radio == 1 && commands.back().session == 1);
     second.disconnect();
 }
 

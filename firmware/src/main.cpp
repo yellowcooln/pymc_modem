@@ -22,6 +22,7 @@
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
 #include "frame_parser.h"
+#include "tcp_endpoint_identity.h"
 #include "compat.h"
 #include "rf_frontend.h"
 #include "agc_maintenance.h"
@@ -1415,6 +1416,15 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         sendError(ERR_INVALID_CMD, src);
         break;
     }
+}
+
+// TCP ingress retains its immutable endpoint binding up to command dispatch.
+// Replies still use the legacy TransportSource::TCP singleton TCPServer::write;
+// this seam alone is NOT safe for a second listener or dual-radio routing.
+void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
+                        TransportSource src, const TcpEndpointIdentity& endpoint) {
+    (void)endpoint;
+    processHostCommand(cmd, payload, len, src);
 }
 
 // ─── Serial-side parser callbacks ───────────────────────────
