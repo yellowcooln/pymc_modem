@@ -824,15 +824,29 @@ static void showAppliedConfig(const RadioConfig& cfg, const BoardConfig& board) 
                      status.last_rssi, status.last_snr);
 }
 
+// Diagnostic ownership stays at the primary call site. The helper controls
+// power-command ordering; this observer samples the very same radio on either
+// side of the command, including when RadioLib rejects it.
+struct PrimaryPowerDiagnostics {
+    const BoardConfig& board;
+    int currentLimitBefore = 0;
+
+    void beforePower(OpenHopSX1262& radio) {
+        currentLimitBefore = (int)radio.getCurrentLimit();
+    }
+    void afterPower(OpenHopSX1262& radio, const RadioConfig& cfg,
+                    int8_t power, int8_t maxPowerDbm, int result) {
+        const int currentLimitAfter = (int)radio.getCurrentLimit();
+        LOG_R_INFO("applyConfig board=%s fw=%s pwr_req=%d pwr=%d max=%d setOutputPower=%d ocp_before=%dmA ocp_after=%dmA",
+                   board.name, fwVersion.c_str(), (int)cfg.power_dbm, (int)power,
+                   (int)maxPowerDbm, result, currentLimitBefore, currentLimitAfter);
+    }
+};
+
 bool applyConfig(RadioHardware& hardware, RadioConfigState& config,
                  const BoardConfig& board) {
-    // Board-specific RadioLib command-power ceiling, not antenna output.
-    const int8_t power = config.config().power_dbm > board.max_tx_power_dbm
-                             ? board.max_tx_power_dbm : config.config().power_dbm;
-    const bool ok = applyRadioConfig(hardware.radio, config.config(), board.max_tx_power_dbm);
-    LOG_R_INFO("applyConfig board=%s fw=%s pwr_req=%d pwr=%d max=%d applied=%d",
-               board.name, fwVersion.c_str(), (int)config.config().power_dbm, (int)power,
-               (int)board.max_tx_power_dbm, (int)ok);
+    const bool ok = applyRadioConfig(hardware.radio, config.config(), board.max_tx_power_dbm,
+                                     PrimaryPowerDiagnostics{board});
     if (ok) showAppliedConfig(config.config(), board);
     return ok;
 }
@@ -1273,14 +1287,18 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     case CMD_SET_CONFIG: {
         // Admission above still refuses secondary commands: there is no
         // independent secondary SX1262, RF front end, or receive worker yet.
-        if (!payload || len != sizeof(RadioConfig)) {
+        if (!owner.config.setFromWire(payload, len)) {
             sendError(ERR_INVALID_CONFIG, route);
             break;
         }
-        LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s", (unsigned)src,
-                   BOARD.name, fwVersion.c_str());
-        if (applyRadioConfigRequest(primaryRadioHardware.radio, owner.config,
-                                    payload, len, BOARD.max_tx_power_dbm)) {
+        const RadioConfig& requested = owner.config.config();
+        LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s freq=%lu bw=%lu sf=%u cr=%u pwr_req=%d sync=0x%04X pre=%u",
+                   (unsigned)src, BOARD.name, fwVersion.c_str(),
+                   (unsigned long)requested.freq_hz, (unsigned long)requested.bandwidth_hz,
+                   (unsigned)requested.sf, (unsigned)requested.cr, (int)requested.power_dbm,
+                   (unsigned)requested.syncword, (unsigned)requested.preamble_len);
+        if (applyRadioConfig(primaryRadioHardware.radio, requested, BOARD.max_tx_power_dbm,
+                             PrimaryPowerDiagnostics{BOARD})) {
             showAppliedConfig(owner.config.config(), BOARD);
             sendFrame(CMD_CONFIG_RESP, owner.config.wireData(), sizeof(RadioConfig), route);
             startReceive();
