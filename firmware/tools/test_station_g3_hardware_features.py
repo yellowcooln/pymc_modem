@@ -50,7 +50,7 @@ assert "StationG3Power::loop();" in main
 assert "StationG3Power::snapshot()" in main
 assert "RFFrontEnd::prepareStandby();" in main
 loop_body = main.split("void loop() {", 1)[1]
-assert loop_body.index("if (dio1Flag && !isTxActive)") < loop_body.index("StationG3Power::loop();")
+assert loop_body.index("if (primaryRadioRuntime.takeRxIrq())") < loop_body.index("StationG3Power::loop();")
 assert loop_body.index("while (Serial.available())") < loop_body.index("StationG3Power::loop();")
 assert loop_body.index("TCPServer::loop()") < loop_body.index("StationG3Power::loop();")
 

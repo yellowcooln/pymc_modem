@@ -15,6 +15,7 @@
 #include "legacy_rak4631_build_flags.h"
 #include "protocol.h"
 #include "radio_config_state.h"
+#include "radio_runtime_state.h"
 #include "board_config.h"
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
@@ -339,20 +340,13 @@ OledDisplay oled;
 static RadioConfigState primaryRadioConfig;
 
 static StatusResp  status        = {};
-// Hard-standby flag set by CMD_RADIO_STANDBY. While true, loop()
-// will NOT call startReceive() after a TX/CAD/RX completion, and
-// the radio sits in idle. Cleared by CMD_RADIO_RESUME (which
-// re-applies the config and re-enters RX).
-static bool radioStandby  = false;
+// One software runtime per radio. RadioLib/SPI and the remaining configuration,
+// CAD and telemetry state are deliberately still singleton in this slice.
+static RadioRuntimeState primaryRadioRuntime;
 static bool autoCadEnabled = false;   // pre-TX CAD; enabled via CMD_SET_AUTO_CAD, persisted in NodeState
 
-// Single DIO1 ISR flag — interpreted as RX_DONE when !isTxActive, otherwise as TX_DONE.
-// A single flag avoids the race where an IRQ that fires at the tail of a TX
-// could leak into the next RX handler or vice-versa.
-static volatile bool dio1Flag    = false;
-static volatile uint32_t dio1IrqCount = 0;
-static bool        radioReady    = false;
-static bool        isTxActive    = false;
+// DIO1 is interpreted as RX_DONE outside TX, and as TX_DONE during TX.
+// Each instance owns its own flag and count; callbacks must only touch theirs.
 
 // ─── Noise floor sampling ────────────────────────────────────
 #define NUM_NOISE_FLOOR_SAMPLES 20
@@ -497,14 +491,14 @@ Snapshot capture() {
     snap.status.uptime_sec = millis() / 1000;
     // StatusResp reserves state 2 for errors; standby remains a healthy idle
     // state and is exposed separately in this richer runtime snapshot.
-    snap.status.radio_state = isTxActive ? 1 : 0;
+    snap.status.radio_state = primaryRadioRuntime.txActive ? 1 : 0;
     snap.status.temp_c = RuntimeStatsValues::cpuTemperatureC(
         compatReadCpuTemperature());
     snap.status.noise_floor_x10 = (int16_t)(noiseFloor * 10.0f);
     snap.status.battery_mv = BatteryMonitor::readMilliVolts(BOARD.battery);
     snap.radio = primaryRadioConfig.config();
     snap.firmwareVersion = fwVersion;
-    snap.radioStandby = radioStandby;
+    snap.radioStandby = primaryRadioRuntime.standby;
     snap.autoCadEnabled = autoCadEnabled;
     snap.hasBatteryChargeRatePctPerHour = BOARD.battery.fuel_gauge_i2c_addr != 0 &&
         BOARD.battery.fuel_gauge_crate_reg != 0;
@@ -535,8 +529,7 @@ Snapshot capture() {
 IRAM_ATTR
 #endif
 void onDio1Rise() {
-    dio1Flag = true;
-    dio1IrqCount = dio1IrqCount + 1;
+    primaryRadioRuntime.onDio1Rise();
 }
 
 // ─── E22 RF switch boot sequence ────────────────────────────
@@ -937,8 +930,8 @@ bool startReceive() {
     // Hard standby blocks every code path that would put the
     // radio into RX. The flag is cleared by CMD_RADIO_RESUME
     // which re-runs applyConfig() and then calls this function
-    // again with radioStandby=false.
-    if (radioStandby) return true;
+    // again with standby=false.
+    if (!primaryRadioRuntime.receiveAllowed()) return true;
     RFFrontEnd::prepareReceive();
     return radio.startReceive() == RADIOLIB_ERR_NONE;
 }
@@ -999,7 +992,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     // ack the non-radio commands (PING, GET_VERSION, GET_WIFI, AUTH, …)
     // but refuse anything that would touch the SX1262. The host can still
     // probe the modem and configure Wi-Fi via the existing flow.
-    if (!BOARD.has_lora_radio || !radioReady) {
+    if (!BOARD.has_lora_radio || !primaryRadioRuntime.ready) {
         switch (cmd) {
         case CMD_TX_REQUEST:  case CMD_SET_CONFIG:  case CMD_GET_CONFIG:
         case CMD_STATUS_REQ:  case CMD_NOISE_REQ:   case CMD_CAD_REQUEST:
@@ -1032,7 +1025,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // indefinitely when SX1262 lost the TX_DONE IRQ (observed after CAD
         // timeouts), which in turn blocked loop() long enough for the 30 s
         // task watchdog to reboot the firmware every minute.
-        isTxActive = true;
+        primaryRadioRuntime.txActive = true;
 
         // ─── Auto-CAD before TX (when enabled by controller) ──
         // Up to CAD_AUTO_RETRIES of CAD-with-backoff. If the
@@ -1067,9 +1060,9 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                 cfg.cad.exitMode  = cadExitMode;
                 cfg.cad.irqFlags  = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
                 cfg.cad.irqMask   = RADIOLIB_IRQ_CAD_DEFAULT_MASK;
-                dio1Flag = false;
+                primaryRadioRuntime.clearIrq();
                 if (radio.startChannelScan(cfg) != RADIOLIB_ERR_NONE) {
-                    dio1Flag = false;
+                    primaryRadioRuntime.clearIrq();
                     break;
                 }
                 uint32_t cad_t0 = millis();
@@ -1082,7 +1075,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                 }
                 radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE |
                                     RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-                dio1Flag = false;
+                primaryRadioRuntime.clearIrq();
                 // A stale RX_DONE software flag must never count as CAD
                 // completion. Only the chip's CAD_DONE flag proves the scan
                 // finished and makes a clear/busy verdict meaningful.
@@ -1100,13 +1093,13 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             // The passive guard already answered without changing radio
             // state; leave RX and its terminal IRQ untouched for loop().
             if (reception_busy) {
-                isTxActive = false;
+                primaryRadioRuntime.txActive = false;
                 sendError(ERR_CHANNEL_BUSY, src);
                 break;
             }
             if (!channel_clear) {
                 LOG_R_WARN("auto-CAD: channel busy after retries, abort TX");
-                isTxActive = false;
+                primaryRadioRuntime.txActive = false;
                 sendError(ERR_CHANNEL_BUSY, src);
                 startReceive();
                 break;
@@ -1121,15 +1114,15 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // KCT8103L front-end leaves the receive-LNA path.
         RFFrontEnd::prepareTransmit();
 
-        dio1Flag = false;
-        uint32_t irqStart = dio1IrqCount;
+        primaryRadioRuntime.clearIrq();
+        uint32_t irqStart = primaryRadioRuntime.irqCount();
         setTxLed(true);
         int state = radio.startTransmit((uint8_t*)payload, len);
         LOG_R_INFO("TX_REQUEST len=%u src=%u state=%d",
                    (unsigned)len, (unsigned)src, state);
         if (state != RADIOLIB_ERR_NONE) {
             LOG_R_ERR("startTransmit() failed, state=%d", state);
-            isTxActive = false;
+            primaryRadioRuntime.txActive = false;
             radio.finishTransmit();
             setTxLed(false);
             sendError(ERR_TX_TIMEOUT, src);
@@ -1146,16 +1139,16 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // didn't make it back through UART".
         const uint32_t TX_TIMEOUT_MS = 4500;
         uint32_t txStart = millis();
-        while (!dio1Flag && (millis() - txStart) < TX_TIMEOUT_MS) {
+        while (!primaryRadioRuntime.irqPending() && (millis() - txStart) < TX_TIMEOUT_MS) {
             compatWdtReset();   // keep watchdog happy while we poll
             delay(2);
         }
 
-        bool txOk = dio1Flag;
+        bool txOk = primaryRadioRuntime.irqPending();
         radio.finishTransmit();
         setTxLed(false);
-        dio1Flag = false;
-        isTxActive = false;
+        primaryRadioRuntime.clearIrq();
+        primaryRadioRuntime.txActive = false;
         lastPacketTime = millis();
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
         lastTxCompleteMs = lastPacketTime;
@@ -1176,7 +1169,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             // Hard TX timeout — the SX1262 is likely stuck in a bad state.
             // Rebuild from scratch: standby → re-apply full config → RX.
             LOG_R_ERR("TX hard timeout (%u bytes, dio1_delta=%lu) — resetting radio",
-                      (unsigned)len, (unsigned long)(dio1IrqCount - irqStart));
+                      (unsigned)len, (unsigned long)(primaryRadioRuntime.irqCount() - irqStart));
             radio.standby();
             delay(5);
             applyConfig(primaryRadioConfig.config());
@@ -1205,12 +1198,12 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         radio.standby();
         delay(1);
 
-        dio1Flag = false;
+        primaryRadioRuntime.clearIrq();
         int state;
         if (cadCustom) {
             // v0.5.9: IRQ flags & mask MUST be set — zero-initialised cfg
             // made RadioLib call setDioIrqParams(0, 0), so CAD_DONE/DETECTED
-            // never routed to DIO1 and our dio1Flag polling always timed
+            // never routed to DIO1 and our DIO1 polling always timed
             // out. That turned every CAD into ERR_CAD_FAILED.
             ChannelScanConfig_t cfg = {};
             cfg.cad.symNum   = cadSymNum;
@@ -1226,7 +1219,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         }
 
         if (state != RADIOLIB_ERR_NONE) {
-            dio1Flag = false;
+            primaryRadioRuntime.clearIrq();
             sendError(ERR_CAD_FAILED, src);
             startReceive();
             break;
@@ -1251,7 +1244,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             radio.standby();
             delay(5);
             applyConfig(primaryRadioConfig.config());
-            dio1Flag = false;
+            primaryRadioRuntime.clearIrq();
             sendError(ERR_CAD_FAILED, src);
             startReceive();
             break;
@@ -1259,7 +1252,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
         radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE |
                             RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-        dio1Flag = false;
+        primaryRadioRuntime.clearIrq();
         uint8_t result[1];
         result[0] = (cadIrq & RADIOLIB_SX126X_IRQ_CAD_DETECTED) ? 1 : 0;
         sendFrame(CMD_CAD_RESP, result, 1, src);
@@ -1438,7 +1431,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     case CMD_RADIO_STANDBY: {
         RFFrontEnd::prepareStandby();
         radio.standby();
-        radioStandby = true;
+        primaryRadioRuntime.standby = true;
         oled.setStandby(true);
 #if defined(BOARD_HELTEC_T114)
         NodeState::setStandby(true);
@@ -1449,7 +1442,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         break;
     }
     case CMD_RADIO_RESUME: {
-        radioStandby = false;
+        primaryRadioRuntime.standby = false;
         oled.setStandby(false);
 #if defined(BOARD_HELTEC_T114)
         NodeState::setStandby(false);
@@ -1567,7 +1560,7 @@ void setup() {
     // whether to enter standby on boot. Display name will be picked
     // up by the OLED at the first show*() call.
     NodeState::begin();
-    radioStandby   = NodeState::getStandby();
+    primaryRadioRuntime.standby   = NodeState::getStandby();
     autoCadEnabled = NodeState::getAutoCad();
 #endif
 
@@ -1646,7 +1639,7 @@ void setup() {
     // Push restored state onto the OLED before showSplash so the
     // boot screen already has the right name + standby tag.
     oled.setDisplayName(NodeState::getDisplayName());
-    oled.setStandby(radioStandby);
+    oled.setStandby(primaryRadioRuntime.standby);
 #endif
     oled.showSplash();
     splashStartedMs = millis();
@@ -1719,7 +1712,7 @@ void setup() {
             while (Serial.availableForWrite() == 0) delay(10);
             sendError(ERR_RADIO_INIT, TransportSource::USB);
             Serial.println("[BOOT] SX1262 init failed — continuing with Wi-Fi/config portal only");
-            radioReady = false;
+            primaryRadioRuntime.ready = false;
         } else {
         rfSwitchConfigureRadio();
         configureBoardRadioOptions();
@@ -1738,13 +1731,13 @@ void setup() {
             while (true) delay(1000);
         }
 
-        radioReady = true;
+        primaryRadioRuntime.ready = true;
         agcMaintenanceSchedule.recordAttempt(millis());
         startRak3401ReadyLedHeartbeat();
         }
     } else {
         Serial.println("[BOOT] no LoRa radio on this board — running as Wi-Fi/Ethernet bridge only");
-        radioReady = false;
+        primaryRadioRuntime.ready = false;
     }
 
     // ─── Network bring-up: Ethernet preferred, Wi-Fi fallback ──
@@ -1867,9 +1860,9 @@ void setup() {
 
 // ─── Noise floor sampling ────────────────────────────────────
 void sampleNoiseFloor() {
-    if (!radioReady || isTxActive) return;
+    if (!primaryRadioRuntime.ready || primaryRadioRuntime.txActive) return;
     if (millis() - lastPacketTime < 500) return;
-    if (dio1Flag) return;  // don't read RSSI while an RX packet is incoming
+    if (primaryRadioRuntime.irqPending()) return;  // don't read RSSI while an RX packet is incoming
     if (millis() - lastNoiseSample < 10) return;
     lastNoiseSample = millis();
 
@@ -1897,10 +1890,10 @@ void maybeResetAgc() {
     if (!RFFrontEnd::hasAgcResetIntervalControl()) return;
 
     AgcMaintenance::Conditions conditions;
-    conditions.radioReady = radioReady;
-    conditions.intentionalStandby = radioStandby;
-    conditions.txActive = isTxActive;
-    conditions.dio1Pending = dio1Flag;
+    conditions.radioReady = primaryRadioRuntime.ready;
+    conditions.intentionalStandby = primaryRadioRuntime.standby;
+    conditions.txActive = primaryRadioRuntime.txActive;
+    conditions.dio1Pending = primaryRadioRuntime.irqPending();
     conditions.intervalSec = RFFrontEnd::getAgcResetIntervalSec();
     conditions.nowMs = millis();
     conditions.lastPacketMs = lastPacketTime;
@@ -1910,7 +1903,7 @@ void maybeResetAgc() {
     conditions.postTxQuietMs = AgcMaintenance::STATION_POST_TX_QUIET_MS;
     if (!AgcMaintenance::shouldAttempt(
             agcMaintenanceSchedule, conditions,
-            []() { return isReceivingPacket() || dio1Flag; })) return;
+            []() { return isReceivingPacket() || primaryRadioRuntime.irqPending(); })) return;
 
     // SetSleep is valid only from SX126x standby. Bypass the external LNA,
     // enter radio standby explicitly, then let RadioLib perform its warm-sleep
@@ -1980,8 +1973,7 @@ void loop() {
 
     // DIO1 during TX is consumed by the TX handler's own wait loop; in
     // loop() we only act on it when the radio is in RX mode.
-    if (dio1Flag && !isTxActive) {
-        dio1Flag = false;
+    if (primaryRadioRuntime.takeRxIrq()) {
         handleLoRaRx();
     }
 
