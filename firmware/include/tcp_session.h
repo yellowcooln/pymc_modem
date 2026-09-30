@@ -7,8 +7,8 @@
 #include <IPAddress.h>
 #include <WiFi.h>
 
-// One socket's parser, authorization and transport state. The listener owns
-// admission policy and may currently attach only one session.
+// One socket's parser, authorization and transport state. Each listener owns
+// a separate session and attaches at most one client at a time.
 class TcpSession {
 public:
     explicit TcpSession(TcpEndpointIdentity endpoint) : endpoint_(endpoint) {}

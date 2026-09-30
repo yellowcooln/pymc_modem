@@ -52,12 +52,26 @@ static bool uartEnabled = true;
             f"-I{firmware / 'tests' / 'tcp_stubs'}", f"-I{firmware / 'include'}",
             str(firmware / "tests" / "tcp_session_baseline_test.cpp"),
             str(firmware / "src" / "tcp_server.cpp"),
+            str(firmware / "src" / "tcp_listener.cpp"),
             str(firmware / "src" / "tcp_session.cpp"),
             str(firmware / "src" / "frame_parser.cpp"),
             str(output),
             "-o", str(executable),
         ], check=True)
         subprocess.run([str(executable)], check=True)
+        listener_executable = pathlib.Path(directory) / "tcp_listener_bank_test"
+        subprocess.run([
+            compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+            "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            "-DARDUINO_ARCH_ESP32",
+            f"-I{firmware / 'tests' / 'tcp_stubs'}", f"-I{firmware / 'include'}",
+            str(firmware / "tests" / "tcp_listener_bank_test.cpp"),
+            str(firmware / "src" / "tcp_listener.cpp"),
+            str(firmware / "src" / "tcp_session.cpp"),
+            str(firmware / "src" / "frame_parser.cpp"),
+            "-o", str(listener_executable),
+        ], check=True)
+        subprocess.run([str(listener_executable)], check=True)
 
         # Bind production W5100S readiness and token-policy definitions to
         # recording socket/IP shims; raw write intentionally remains ungated.

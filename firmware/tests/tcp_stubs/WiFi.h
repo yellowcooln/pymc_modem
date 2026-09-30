@@ -46,8 +46,20 @@ private:
 
 class WiFiServer {
 public:
-    explicit WiFiServer(uint16_t port) : port_(port) { current = this; }
-    ~WiFiServer() { if (current == this) current = nullptr; }
+    explicit WiFiServer(uint16_t port) : port_(port) {
+        current = this;
+        servers.push_back(this);
+    }
+    ~WiFiServer() {
+        for (auto it = servers.begin(); it != servers.end(); ++it) {
+            if (*it == this) { servers.erase(it); break; }
+        }
+        current = servers.empty() ? nullptr : servers.back();
+    }
+    static WiFiServer* forPort(uint16_t port) {
+        for (auto* server : servers) if (server->port_ == port) return server;
+        return nullptr;
+    }
     void begin() { active = true; }
     void end() { active = false; }
     void setNoDelay(bool enabled) { no_delay = enabled; }
@@ -59,6 +71,7 @@ public:
     }
     uint16_t port() const { return port_; }
     static inline WiFiServer* current = nullptr;
+    static inline std::vector<WiFiServer*> servers;
     std::deque<fake_tcp::SocketPtr> pending;
     bool active = false;
     bool no_delay = false;

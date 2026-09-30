@@ -17,7 +17,8 @@ class RecoveryTests(unittest.TestCase):
         cls.binary = Path(cls.tmp.name) / 'recovery'
         subprocess.run(['g++', '-std=c++17', '-DRECOVERY_IMPLEMENTED', '-Wall', '-Wextra', '-Werror',
                         '-I' + str(STUBS), '-I' + str(ROOT / 'include'),
-                        str(STUBS / 'recovery.cpp'), str(ROOT / 'src/tcp_session.cpp'),
+                        str(STUBS / 'recovery.cpp'), str(ROOT / 'src/tcp_listener.cpp'),
+                        str(ROOT / 'src/tcp_session.cpp'),
                         '-o', str(cls.binary)], check=True)
 
     @classmethod
