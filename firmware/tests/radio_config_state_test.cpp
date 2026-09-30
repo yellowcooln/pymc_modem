@@ -17,6 +17,7 @@ int main() {
         12, 5, 31, 0x34, 0x12, 9
     };
     assert(!primary.setFromWire(requested, sizeof(requested) - 1));
+    assert(!primary.setFromWire(nullptr, sizeof(requested)));
     assert(std::memcmp(primary.wireData(), &defaults, sizeof(defaults)) == 0);
     assert(primary.setFromWire(requested, sizeof(requested)));
     assert(std::memcmp(primary.wireData(), requested, sizeof(requested)) == 0);

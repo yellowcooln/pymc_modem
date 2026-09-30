@@ -17,7 +17,7 @@ public:
     // The command stores the requested bytes before hardware apply. A failed
     // apply must not roll the request back (legacy GET_CONFIG behavior).
     bool setFromWire(const uint8_t* payload, size_t len) {
-        if (len != sizeof(config_)) return false;
+        if (!payload || len != sizeof(config_)) return false;
         std::memcpy(&config_, payload, sizeof(config_));
         return true;
     }
