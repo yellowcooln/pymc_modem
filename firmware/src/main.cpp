@@ -19,6 +19,7 @@
 #include "radio_runtime_state.h"
 #include "radio_irq_owner.h"
 #include "radio_command_context.h"
+#include "radio_endpoint_registry.h"
 #include "radio_command_admission.h"
 #include "radio_rx_owner.h"
 #include "radio_cad_owner.h"
@@ -1260,26 +1261,33 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                         ResponseRoute route) {
-    // Reject before primary-owner dispatch (and before OTA frame accounting).
+    // Only the active primary listener is installed. Registration is a
+    // command-owner lookup, not RF2 activation or permission to use its chip.
+    RadioCommandContext primary{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
 #ifdef ARDUINO_ARCH_ESP32
     if (route.source == TransportSource::TCP && !route.tcp) return;
-#endif
-    RadioCommandContext primary{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
-    // No second physical command owner is installed yet. In particular a
-    // forged/unrecognized endpoint must never fall through to radio 0.
-#ifdef ARDUINO_ARCH_ESP32
-    if (route.tcp && (route.tcp->endpoint().radio != 0 ||
-                      route.tcp->endpoint().session != 0)) {
+    if (route.source != TransportSource::TCP && !route.tcp) {
+        // Serial commands do not depend on network availability.
+        processHostCommand(cmd, payload, len, route, primary);
+        return;
+    }
+    // Capacity is not an activation count: only primary is registered today.
+    RadioEndpointRegistry<TcpSession, 4> owners;
+    if (!owners.add(0, 0, TCPServer::primaryPort(), primary, TCPServer::primarySession())) return;
+    RadioCommandContext* owner = owners.resolve(route);
+    if (!owner) {
         sendError(ERR_INVALID_CMD, route);
         return;
     }
+    processHostCommand(cmd, payload, len, route, *owner);
 #else
     if (route.tcp) {
         sendError(ERR_INVALID_CMD, route);
         return;
     }
-#endif
+    // W5100S/USB/UART retain their legacy transport and primary owner.
     processHostCommand(cmd, payload, len, route, primary);
+#endif
 }
 
 // Legacy USB/UART and W5100S ingress keep their single-transport route.

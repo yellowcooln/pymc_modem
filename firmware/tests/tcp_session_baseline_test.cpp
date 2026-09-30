@@ -60,11 +60,15 @@ static fake_tcp::SocketPtr connect(IPAddress remote = {192, 168, 1, 2},
 }
 static void start(const char* token = "secret") {
     TCPServer::end();
+    assert(TCPServer::primaryPort() == 0);
     commands.clear();
     parse_errors.clear();
     TCPServer::begin(5055, String(token));
     assert(WiFiServer::current && WiFiServer::current->active);
     assert(WiFiServer::current->port() == 5055);
+    assert(TCPServer::primaryPort() == 5055);
+    assert(TCPServer::primarySession()->endpoint().radio == 0);
+    assert(TCPServer::primarySession()->endpoint().session == 0);
 }
 static void expectOutput(const fake_tcp::SocketPtr& socket, uint8_t cmd,
                          std::vector<uint8_t> payload = {}) {

@@ -17,6 +17,7 @@ public:
     void loop();
     void invalidateInterface(const IPAddress& address);
     bool isClientReady() { return session_.isReady(); }
+    TcpSession* session() { return &session_; }
     String getClientIP() { return session_.clientIP(); }
     void write(const uint8_t* data, size_t len) { session_.write(data, len); }
     void writeRadioEvent(const uint8_t* data, size_t len, uint8_t originRadio) {

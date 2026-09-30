@@ -9,7 +9,13 @@
 #include <stdint.h>
 #include <IPAddress.h>
 
+class TcpSession;
 namespace TCPServer {
+
+// The one production listener's session and active port. Neither accessor
+// creates another listener or relaxes its authentication policy.
+TcpSession* primarySession();
+uint16_t primaryPort();
 
 // Start (or restart) the server. Call after WiFi STA is up.
 // If token.length() > 0, clients must send CMD_AUTH with matching

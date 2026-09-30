@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix='openhop-command-dispatch-') as tmp:
     cpp.write_text('''#include "radio_command_context.h"
 #include "tcp_session.h"
 #include "response_route.h"
+#include "radio_endpoint_registry.h"
 #include "protocol.h"
 #include <cassert>
 #include <cstring>
@@ -35,6 +36,12 @@ Snapshot capture() { return {livePrimary}; }
 RadioConfigState primaryRadioConfig;
 RadioRuntimeState primaryRadioRuntime;
 StatusResp status = {};
+void noteTransportFrameError(uint8_t) {}
+TcpSession* installed = nullptr;
+namespace TCPServer {
+TcpSession* primarySession() { return installed; }
+uint16_t primaryPort() { return 5055; }
+}
 ''' + source[start:end] + '''
 int routed = 0;
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
@@ -91,8 +98,11 @@ int main() {
     TcpSession second(TcpEndpointIdentity{1, 7});
     TcpSession wrongSession(TcpEndpointIdentity{1, 99});
     TcpSession invalid(TcpEndpointIdentity{0, 3});
-    ResponseRoute firstRoute{TransportSource::TCP, &first, 1};
-    ResponseRoute secondRoute{TransportSource::TCP, &second, 2};
+    installed = &first;
+    first.accept(WiFiClient(std::make_shared<fake_tcp::Socket>()));
+    second.accept(WiFiClient(std::make_shared<fake_tcp::Socket>()));
+    ResponseRoute firstRoute = first.responseRoute();
+    ResponseRoute secondRoute = second.responseRoute();
     ResponseRoute wrongSessionRoute{TransportSource::TCP, &wrongSession, 4};
     ResponseRoute invalidRoute{TransportSource::TCP, &invalid, 3};
     assert(rejectUnownedCommand(CMD_GET_CONFIG, wrongSessionRoute, b));
@@ -124,6 +134,16 @@ int main() {
     expect(CMD_ERROR, &bad, 1, secondRoute);
     processHostCommand(CMD_GET_CONFIG, none, 0, invalidRoute);
     expect(CMD_ERROR, &bad, 1, invalidRoute);
+    TcpSession forged(TcpEndpointIdentity{0, 0});
+    forged.accept(WiFiClient(std::make_shared<fake_tcp::Socket>()));
+    auto forgedRoute = forged.responseRoute();
+    processHostCommand(CMD_GET_CONFIG, none, 0, forgedRoute);
+    expect(CMD_ERROR, &bad, 1, forgedRoute);
+    auto staleRoute = firstRoute;
+    first.accept(WiFiClient(std::make_shared<fake_tcp::Socket>()));
+    processHostCommand(CMD_GET_CONFIG, none, 0, staleRoute);
+    expect(CMD_ERROR, &bad, 1, staleRoute);
+    firstRoute = first.responseRoute();
     assert(routed == 0);
     primaryRadioRuntime.ready = true;
     processHostCommand(CMD_GET_CONFIG, none, 0, firstRoute);
@@ -141,5 +161,7 @@ int main() {
     subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                     '-DARDUINO_ARCH_ESP32',
                     '-I' + str(firmware / 'tests/tcp_stubs'), '-I' + str(firmware / 'include'),
-                    str(cpp), '-o', str(Path(tmp) / 'dispatch')], check=True)
+                    str(cpp), str(firmware / 'src/tcp_session.cpp'),
+                    str(firmware / 'src/frame_parser.cpp'),
+                    '-o', str(Path(tmp) / 'dispatch')], check=True)
     subprocess.run([str(Path(tmp) / 'dispatch')], check=True)

@@ -6,9 +6,16 @@
 namespace TCPServer {
 
 static TcpListener primary(TcpEndpointIdentity{0, 0});
+static uint16_t activePort = 0;
 
-void begin(uint16_t port, const String& token) { primary.begin(port, token); }
-void end() { primary.end(); }
+void begin(uint16_t port, const String& token) {
+    activePort = 0;
+    primary.begin(port, token);
+    activePort = port;
+}
+void end() { primary.end(); activePort = 0; }
+TcpSession* primarySession() { return primary.session(); }
+uint16_t primaryPort() { return activePort; }
 void invalidateInterface(const IPAddress& address) { primary.invalidateInterface(address); }
 void loop() { primary.loop(); }
 bool isClientReady() { return primary.isClientReady(); }
