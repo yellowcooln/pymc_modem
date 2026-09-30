@@ -112,11 +112,10 @@ int main() {
                         "-o", str(directory / "noise_coupling")], check=True)
         subprocess.run([str(directory / "noise_coupling")], check=True)
 
-        # Run the production CAD setters and RadioLib scan-selection block
-        # against a recording radio; no physical operation is substituted into
-        # main.cpp, only the hardware object is stubbed at the host boundary.
+        # Exercise the production CAD policy setter and TX auto-CAD config.
+        # CAD_REQUEST scan/timeout/recovery now lives in radio_cad_owner.h
+        # and is exercised with two hardware owners by test_radio_cad_owner.py.
         setter = source.split("    case CMD_SET_CAD_PARAMS: {", 1)[1].split("    case ", 1)[0]
-        scan = source.split("        primaryRadioRuntime.clearIrq();\n        int state;", 1)[1].split("\n        if (state != RADIOLIB_ERR_NONE)", 1)[0]
         auto_scan = source.split("                ChannelScanConfig_t cfg = {};", 1)[1].split("                primaryRadioRuntime.clearIrq();", 1)[0]
         cad_coupling = directory / "cad_coupling.cpp"
         cad_coupling.write_text('''#include "radio_runtime_state.h"
@@ -145,30 +144,17 @@ void configure(const uint8_t* payload, int len) {
     case CMD_SET_CAD_PARAMS: {''' + setter + '''
     }
 }
-void startScan() {
-    primaryRadioRuntime.clearIrq();
-    int state;
-''' + scan + '''
-    assert(state == 0);
-}
 ChannelScanConfig_t autoScanConfig() {
     ChannelScanConfig_t cfg = {};
 ''' + auto_scan + '''
     return cfg;
 }
 int main() {
-    startScan();
-    assert(radio.defaults == 1 && radio.custom == 0);
     const uint8_t requested[4] = {4, 31, 12, 1};
     configure(requested, 3);
     assert(errors == 1 && responses == 0 && !primaryRadioRuntime.cad.custom);
     configure(requested, 4);
     assert(responses == 1 && sleeps == 1 && primaryRadioRuntime.cad.custom);
-    startScan();
-    assert(radio.defaults == 1 && radio.custom == 1);
-    assert(radio.last.cad.symNum == 4 && radio.last.cad.detPeak == 31);
-    assert(radio.last.cad.detMin == 12 && radio.last.cad.exitMode == 1);
-    assert(radio.last.cad.irqFlags == 3 && radio.last.cad.irqMask == 2);
     auto autoCfg = autoScanConfig();
     assert(autoCfg.cad.symNum == 4 && autoCfg.cad.detPeak == 31);
     assert(autoCfg.cad.detMin == 12 && autoCfg.cad.exitMode == 1);

@@ -19,6 +19,7 @@
 #include "radio_runtime_state.h"
 #include "radio_command_context.h"
 #include "radio_rx_owner.h"
+#include "radio_cad_owner.h"
 #include "board_config.h"
 #include "radio_hardware.h"
 #include "radio_initialization.h"
@@ -1141,87 +1142,16 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_CAD_REQUEST: {
-        // Passive guard first: a reception in progress IS a busy verdict,
-        // and the standby below would abort the very frame this request is
-        // probing for. Answer busy without touching the radio — the frame's
-        // terminal IRQ will deliver it to the host.
-        if (isReceivingPacket()) {
-            uint8_t result[1] = {1};
-            sendFrame(CMD_CAD_RESP, result, 1, route);
-            break;
-        }
-        // v0.5.8: non-blocking CAD with our own timeout.
-        // The previous radio.scanChannel() was synchronous and would block
-        // until CAD_DONE IRQ arrived. When SX1262 dropped that IRQ (first
-        // scan after setCAD, or generally unreliable behaviour at SF8/BW62k)
-        // loopTask sat in scanChannel for tens of seconds without feeding
-        // the task watchdog — reboot cycle every ~60 s.
-        radio.standby();
-        delay(1);
-
-        primaryRadioRuntime.clearIrq();
-        int state;
-        if (primaryRadioRuntime.cad.custom) {
-            // v0.5.9: IRQ flags & mask MUST be set — zero-initialised cfg
-            // made RadioLib call setDioIrqParams(0, 0), so CAD_DONE/DETECTED
-            // never routed to DIO1 and our DIO1 polling always timed
-            // out. That turned every CAD into ERR_CAD_FAILED.
-            ChannelScanConfig_t cfg = {};
-            cfg.cad.symNum   = primaryRadioRuntime.cad.symNum;
-            cfg.cad.detPeak  = primaryRadioRuntime.cad.detPeak;
-            cfg.cad.detMin   = primaryRadioRuntime.cad.detMin;
-            cfg.cad.exitMode = primaryRadioRuntime.cad.exitMode;
-            cfg.cad.timeout  = 0;
-            cfg.cad.irqFlags = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
-            cfg.cad.irqMask  = RADIOLIB_IRQ_CAD_DEFAULT_MASK;
-            state = radio.startChannelScan(cfg);
-        } else {
-            state = radio.startChannelScan();   // overload already sets flags
-        }
-
-        if (state != RADIOLIB_ERR_NONE) {
-            primaryRadioRuntime.clearIrq();
-            sendError(ERR_CAD_FAILED, route);
-            startReceive();
-            break;
-        }
-
-        // 500 ms easily covers a legitimate CAD scan at any SF+symNum we use.
-        const uint32_t CAD_TIMEOUT_MS = 500;
-        uint32_t cadStart = millis();
-        uint16_t cadIrq = 0;
-        while ((millis() - cadStart) < CAD_TIMEOUT_MS) {
-            cadIrq = radio.getIrqFlags();
-            if (cadIrq & RADIOLIB_SX126X_IRQ_CAD_DONE) break;
-            compatWdtReset();
-            delay(1);
-        }
-
-        if (!(cadIrq & RADIOLIB_SX126X_IRQ_CAD_DONE)) {
-            // CAD_DONE never fired — treat as failure and clean up the chip
-            // before the next request. Don't block the repeater's LBT
-            // forever; reporting failure lets the host decide.
-            LOG_R_WARN("CAD IRQ timeout — resetting radio");
-            radio.standby();
-            delay(5);
-            applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD);
-            primaryRadioRuntime.clearIrq();
-            sendError(ERR_CAD_FAILED, route);
-            startReceive();
-            break;
-        }
-
-        radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE |
-                            RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-        primaryRadioRuntime.clearIrq();
-        uint8_t result[1];
-        result[0] = (cadIrq & RADIOLIB_SX126X_IRQ_CAD_DETECTED) ? 1 : 0;
-        sendFrame(CMD_CAD_RESP, result, 1, route);
-        // Back to RX right away: the scan parked the radio in standby, and
-        // the host probes every ~200 ms for its whole LBT budget — without
-        // this the modem is deaf between probes, so it can neither receive
-        // the traffic it is deferring to nor arm the passive guard above.
-        startReceive();
+        runRadioCad(primaryRadioHardware, owner, route,
+            [] { return isReceivingPacket(); }, [] { return millis(); },
+            [](unsigned ms) { delay(ms); }, [] { compatWdtReset(); },
+            [] { LOG_R_WARN("CAD IRQ timeout — resetting radio");
+                 return applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD); },
+            [] { startReceive(); },
+            [](uint8_t response, uint8_t value, ResponseRoute replyRoute) {
+                if (response == CMD_ERROR) sendError(value, replyRoute);
+                else sendFrame(response, &value, 1, replyRoute);
+            });
         break;
     }
 
