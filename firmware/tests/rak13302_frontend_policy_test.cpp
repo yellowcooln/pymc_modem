@@ -38,10 +38,21 @@ int main() {
     assert(first.transmit() && arbiter.owner() == 0);
     const auto before = b.writes.size();
     assert(!second.transmit() && b.writes.size() == before);
-    assert(!arbiter.release(1) && !arbiter.acquire(0));
-    assert(first.shutdown() && arbiter.owner() == -1);
+    assert(arbiter.owner() == 0);
+    const auto txWrites = a.writes.size();
+    assert(!first.shutdown() && arbiter.owner() == 0);
+    assert(first.state() == State::Transmit && a.writes.size() == txWrites);
+    assert(!first.receive() && arbiter.owner() == 0);
+    assert(first.finishTransmit() && first.state() == State::Receive && arbiter.owner() == -1);
+    assert(a.writes.size() == txWrites && a.writes.back().level); // RX retains HIGH
+    assert(first.shutdown());
     assert(second.transmit() && arbiter.owner() == 1);
-    assert(second.setSupplyReady(false) && arbiter.owner() == -1);
+    const auto activeWrites = b.writes.size();
+    assert(!second.setSupplyReady(false) && arbiter.owner() == 1);
+    assert(b.writes.size() == activeWrites && second.state() == State::Fault);
+    assert(!second.setSupplyReady(true) && !second.supplyReady());
+    assert(!first.transmit() && !second.shutdown());
+    assert(second.finishTransmit() && arbiter.owner() == -1);
     assert(second.state() == State::Off && !second.transmit());
     assert(!second.supplyReady());
     assert(first.setSupplyReady(false) && !first.receive());
@@ -68,18 +79,20 @@ int main() {
     assert(!third.receive() && third.state() == State::Off && arbiter.owner() == -1);
     assert(!third.transmit() && arbiter.owner() == -1 && third.state() == State::Off);
     assert(fourth.transmit());
-    assert(fourth.shutdown());
+    assert(fourth.finishTransmit() && fourth.shutdown());
     // Failed LOW during shutdown retains the grant and latches Fault.
     c.failPin = -1;
     assert(third.transmit());
     c.failPin = 27; c.failLevel = 0;
-    assert(!third.shutdown() && third.state() == State::Fault);
+    assert(!third.shutdown() && third.state() == State::Transmit);
+    assert(!third.setSupplyReady(false) && third.state() == State::Fault);
+    assert(!third.finishTransmit() && third.state() == State::Fault);
     assert(arbiter.owner() == 0 && !fourth.transmit());
     assert(!third.receive() && !third.transmit());
     c.failPin = -1;
     assert(third.shutdown() && arbiter.owner() == -1);
     assert(third.setSupplyReady(true) && fourth.transmit());
-    assert(fourth.shutdown());
+    assert(fourth.finishTransmit() && fourth.shutdown());
     // Failed HIGH and LOW together also retains the grant.
     struct FailBoth : Gpio {
         bool failAll = false;
@@ -95,5 +108,5 @@ int main() {
     assert(!fourth.transmit());
     e.failAll = false;
     assert(fifth.shutdown() && arbiter.owner() == -1);
-    assert(fourth.transmit() && fourth.shutdown());
+    assert(fourth.transmit() && fourth.finishTransmit() && fourth.shutdown());
 }

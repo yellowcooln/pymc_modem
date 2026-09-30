@@ -10,6 +10,7 @@
 namespace Rak13302 {
 
 enum class State : uint8_t { Off, Receive, Transmit, Fault };
+template <class Gpio> class FrontEnd;
 
 // Single cooperative owner for two radios. Callers must serialize access;
 // this is not an IRQ-safe mutex. It prevents simultaneous TX grants only:
@@ -19,6 +20,10 @@ public:
     TxArbiter() = default;
     TxArbiter(const TxArbiter&) = delete;
     TxArbiter& operator=(const TxArbiter&) = delete;
+    int owner() const { return owner_; }
+
+private:
+    template <class Gpio> friend class FrontEnd;
     bool acquire(uint8_t radio) {
         if (radio >= 2 || owner_ != -1) return false;
         owner_ = radio;
@@ -29,9 +34,6 @@ public:
         owner_ = -1;
         return true;
     }
-    int owner() const { return owner_; }
-
-private:
     int owner_ = -1;
 };
 
@@ -61,6 +63,12 @@ public:
         if (!initialized_) return false;
         if (!ready) {
             supplyReady_ = false;
+            // Loss of a rail assertion cannot prove that the SX1262 stopped.
+            // Keep ANT_SW and the TX interlock until explicit acknowledgement.
+            if (txActive_) {
+                state_ = State::Fault;
+                return false;
+            }
             return shutdown();
         }
         if (state_ == State::Fault) return false;
@@ -81,13 +89,25 @@ public:
             state_ == State::Transmit || !arbiter_.acquire(radio_)) return false;
         if (!gpio_.write(pin_, true)) return failHigh();
         state_ = State::Transmit;
+        txActive_ = true;
         return true;
     }
 
-    // Enter standby/off before removing a supply. Never relinquish TX
+    // Acknowledge only AFTER RadioLib finishTransmit()/standby succeeds and
+    // the SX1262 can no longer transmit. This method does not stop the radio.
+    // On a healthy supply RX keeps ANT_SW HIGH; after supply loss drive LOW.
+    bool finishTransmit() {
+        if (!initialized_ || !txActive_ || arbiter_.owner() != radio_) return false;
+        txActive_ = false; // failed LOW may now be retried via shutdown()
+        if (!supplyReady_ || state_ == State::Fault) return shutdown();
+        state_ = State::Receive;
+        return arbiter_.release(radio_);
+    }
+
+    // Normal shutdown cannot stop an active SX1262 TX. Never relinquish TX
     // ownership when a LOW write fails.
     bool shutdown() {
-        if (!initialized_) return false;
+        if (!initialized_ || txActive_) return false;
         if (!gpio_.write(pin_, false)) {
             state_ = State::Fault;
             return false;
@@ -115,6 +135,7 @@ private:
     TxArbiter& arbiter_;
     bool initialized_ = false;
     bool supplyReady_ = false;
+    bool txActive_ = false;
     State state_ = State::Off;
 };
 
