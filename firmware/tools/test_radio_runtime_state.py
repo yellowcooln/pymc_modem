@@ -156,11 +156,12 @@ struct RecordingRadio {
     int startChannelScan(ChannelScanConfig_t cfg) { ++custom; last = cfg; return 0; }
 } radio;
 RadioRuntimeState primaryRadioRuntime, second;
+struct Owner { RadioRuntimeState& runtime; };
 int errors = 0, responses = 0, sleeps = 0;
 void sendError(int, int) { ++errors; }
 void sendFrame(int, const uint8_t*, int, int) { ++responses; }
 void delay(int) { ++sleeps; }
-void configure(const uint8_t* payload, int len) {
+void configure(Owner owner, const uint8_t* payload, int len) {
     int route = 0;
     switch (CMD_SET_CAD_PARAMS) {
     case CMD_SET_CAD_PARAMS: {''' + setter + '''
@@ -168,11 +169,13 @@ void configure(const uint8_t* payload, int len) {
 }
 int main() {
     const uint8_t requested[4] = {4, 31, 12, 1};
-    configure(requested, 3);
+    configure(Owner{primaryRadioRuntime}, requested, 3);
     assert(errors == 1 && responses == 0 && !primaryRadioRuntime.cad.custom);
-    configure(requested, 4);
+    configure(Owner{primaryRadioRuntime}, requested, 4);
     assert(responses == 1 && sleeps == 1 && primaryRadioRuntime.cad.custom);
     assert(!second.cad.custom && second.cad.symNum == 1);
+    configure(Owner{second}, requested, 4);
+    assert(second.cad.custom && second.cad.symNum == 4);
 }
 ''')
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",

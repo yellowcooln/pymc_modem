@@ -971,7 +971,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     // but refuse anything that would touch the SX1262. The host can still
     // probe the modem and configure Wi-Fi via the existing flow.
     if (rejectUnavailableRadioCommand(cmd, BOARD.has_lora_radio,
-                                      primaryRadioRuntime.ready,
+                                      owner.runtime.ready,
                                       [route](uint8_t error) { sendError(error, route); })) return;
 
     switch (cmd) {
@@ -1034,7 +1034,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             sendError(ERR_INVALID_CONFIG, route);
             break;
         }
-        primaryRadioRuntime.cad.setParams(payload);
+        owner.runtime.cad.setParams(payload);
 
         // Ack before letting the chip settle. A blocking primer scan here
         // was attempted in an earlier v0.5.5 draft and itself hung — the
@@ -1145,7 +1145,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // it survives modem reboot independent of the controller.
         if (len < 1) { sendError(ERR_INVALID_CMD, route); break; }
         bool on = payload[0] != 0;
-        primaryRadioRuntime.cad.autoEnabled = on;
+        owner.runtime.cad.autoEnabled = on;
 #if defined(BOARD_HELTEC_T114)
         NodeState::setAutoCad(on);
 #endif
