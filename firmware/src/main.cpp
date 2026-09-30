@@ -959,6 +959,9 @@ static bool dispatchRadioQuery(uint8_t cmd, const uint8_t*, uint16_t,
 static bool rejectUnownedCommand(uint8_t cmd, ResponseRoute route,
                                  RadioCommandContext& owner) {
 #ifdef ARDUINO_ARCH_ESP32
+    // A TCP reply without a session would use the singleton broadcast socket.
+    // Drop it without even sending an error to that unrelated client.
+    if (route.source == TransportSource::TCP && !route.tcp) return true;
     if (route.tcp) {
         const TcpEndpointIdentity& endpoint = route.tcp->endpoint();
         if (route.source != TransportSource::TCP || endpoint.radio != owner.radioId ||
@@ -1499,6 +1502,10 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                         ResponseRoute route) {
+    // Reject before primary-owner dispatch (and before OTA frame accounting).
+#ifdef ARDUINO_ARCH_ESP32
+    if (route.source == TransportSource::TCP && !route.tcp) return;
+#endif
     RadioCommandContext primary{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
     // No second physical command owner is installed yet. In particular a
     // forged/unrecognized endpoint must never fall through to radio 0.

@@ -102,7 +102,15 @@ int main() {
     expect(CMD_ERROR, &bad, 1, invalidRoute);
     assert(!rejectUnownedCommand(CMD_GET_CONFIG, firstRoute, a));
     assert(!rejectUnownedCommand(CMD_GET_CONFIG, usb, a));
+    ResponseRoute uart{TransportSource::UART, nullptr, 0};
+    assert(!rejectUnownedCommand(CMD_GET_CONFIG, uart, a));
+    ResponseRoute missingSession{TransportSource::TCP, nullptr, 0};
+    assert(rejectUnownedCommand(CMD_GET_CONFIG, missingSession, a));
+    assert(replies.empty()); // Never send an error through singleton TCP fallback.
+    assert(rejectUnownedCommand(CMD_GET_CONFIG, missingSession, b));
     assert(replies.empty());
+    processHostCommand(CMD_GET_CONFIG, none, 0, missingSession);
+    assert(replies.empty() && routed == 0); // Wrapper must not dispatch or reply.
     assert(!rejectUnownedCommand(CMD_GET_CONFIG, secondRoute, b));
     assert(dispatchRadioQuery(CMD_GET_CONFIG, none, 0, secondRoute, b));
     expect(CMD_CONFIG_RESP, bConfig.wireData(), sizeof(RadioConfig), secondRoute);
