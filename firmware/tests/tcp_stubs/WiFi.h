@@ -21,7 +21,8 @@ class WiFiClient {
 public:
     WiFiClient() = default;
     explicit WiFiClient(fake_tcp::SocketPtr socket) : socket_(std::move(socket)) {}
-    explicit operator bool() const { return socket_ != nullptr; }
+    // Arduino-ESP32 NetworkClient::operator bool() delegates to connected().
+    explicit operator bool() const { return connected(); }
     bool connected() const { return socket_ && socket_->connected; }
     int available() const { return socket_ ? static_cast<int>(socket_->input.size()) : 0; }
     int read() {

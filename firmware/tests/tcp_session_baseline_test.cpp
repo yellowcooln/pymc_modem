@@ -140,7 +140,8 @@ static void testReconnectAndInterfaceInvalidation() {
     enqueue(fresh, frame(CMD_PING));
     TCPServer::loop();
     expectOutput(fresh, CMD_ERROR, {ERR_UNAUTHORIZED});
-    assert(old->stopped && fresh->stopped && commands.empty());
+    assert(fresh->stopped && commands.empty() && !TCPServer::isClientReady());
+    assert(TCPServer::getClientIP().length() == 0);
 
     auto ethernet = connect({10,0,0,2}, {10,0,0,10});
     authenticate(ethernet);
@@ -181,6 +182,35 @@ static void testPartialFrameAndSingleClientOwnership() {
     assert(waiting->stopped && commands.empty());
 }
 
+static void testPartialAuthCannotCrossReconnect() {
+    start();
+    auto old = connect();
+    const auto auth = frame(CMD_AUTH, {'s','e','c','r','e','t'});
+    enqueue(old, std::vector<uint8_t>(auth.begin(), auth.begin() + 3));
+    TCPServer::loop();
+    assert(!TCPServer::isClientReady() && old->output.empty());
+
+    old->connected = false;
+    auto fresh = connect({192,168,1,3});
+    enqueue(fresh, auth);
+    TCPServer::loop();
+    expectOutput(fresh, CMD_AUTH_OK);
+    assert(TCPServer::isClientReady() && TCPServer::getClientIP() == "192.168.1.3");
+    assert(commands.empty() && parse_errors.empty());
+
+    // Even after authentication, a truncated frame must not contaminate the
+    // next socket or allow it to inherit the previous socket's authorization.
+    enqueue(fresh, std::vector<uint8_t>(auth.begin(), auth.begin() + 3));
+    TCPServer::loop();
+    fresh->connected = false;
+    auto next = connect({192,168,1,4});
+    enqueue(next, frame(CMD_PING));
+    TCPServer::loop();
+    expectOutput(next, CMD_ERROR, {ERR_UNAUTHORIZED});
+    assert(next->stopped && !TCPServer::isClientReady());
+    assert(commands.empty() && parse_errors.empty());
+}
+
 static void testNonLanRejectedBeforeParsing() {
     start("");
     auto public_socket = connect({8,8,8,8});
@@ -199,7 +229,8 @@ int main() {
     testParsingAndFairness();
     testReconnectAndInterfaceInvalidation();
     testPartialFrameAndSingleClientOwnership();
+    testPartialAuthCannotCrossReconnect();
     testNonLanRejectedBeforeParsing();
     TCPServer::end();
-    std::puts("TCP production session baseline: PASS (5 scenarios)");
+    std::puts("TCP production session baseline: PASS (6 scenarios)");
 }
