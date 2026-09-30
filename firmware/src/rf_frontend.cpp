@@ -24,7 +24,14 @@ public:
         bool found = p.isKey(key);
         if (found) {
             if (strcmp(key, STATION_G3_RF_CONFIG_KEY) == 0) value = p.getUChar(key, 0);
-            else if (strstr(key, "agc_sec")) value = p.getUShort(key, 0);
+            else if (strcmp(key, STATION_G3_PA_HIGH_KEY) == 0)
+                value = p.getBool(key, BOARD.rf_frontend.pa_default_high) ? 1U : 0U;
+            else if (strcmp(key, STATION_G3_LNA_ENABLED_KEY) == 0)
+                value = p.getBool(key, BOARD.rf_frontend.lna_default_enabled) ? 1U : 0U;
+            else if (strcmp(key, V43_LNA_BYPASS_KEY) == 0)
+                value = p.getBool(key, true) ? 1U : 0U;
+            else if (strstr(key, "agc_sec"))
+                value = p.getUShort(key, static_cast<uint16_t>(BOARD.sx126x_agc_reset_interval_ms / 1000U));
             else value = p.getBool(key, false) ? 1U : 0U;
         }
         p.end();
