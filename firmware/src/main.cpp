@@ -20,6 +20,7 @@
 #include "radio_command_context.h"
 #include "radio_rx_owner.h"
 #include "radio_cad_owner.h"
+#include "radio_tx_owner.h"
 #include "board_config.h"
 #include "radio_hardware.h"
 #include "radio_initialization.h"
@@ -969,175 +970,41 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     switch (cmd) {
 
     case CMD_TX_REQUEST: {
-        if (len == 0 || len > MAX_LORA_PAYLOAD) {
-            sendError(ERR_PAYLOAD_TOO_BIG, route);
-            break;
-        }
-        // Reception guard, independent of auto-CAD: a frame being received
-        // is authoritative — refuse rather than trample it. The radio stays
-        // untouched (standby or startReceive() here would abort the frame);
-        // its terminal IRQ delivers it to the host, and the host retries the
-        // TX within its LBT budget on ERR_CHANNEL_BUSY.
-        if (isReceivingPacket()) {
-            sendError(ERR_CHANNEL_BUSY, route);
-            break;
-        }
-        // v0.5.7: non-blocking TX with our own timeout.
-        // The previous radio.transmit() was synchronous and could wait
-        // indefinitely when SX1262 lost the TX_DONE IRQ (observed after CAD
-        // timeouts), which in turn blocked loop() long enough for the 30 s
-        // task watchdog to reboot the firmware every minute.
-        primaryRadioRuntime.txActive = true;
-
-        // ─── Auto-CAD before TX (when enabled by controller) ──
-        // Up to CAD_AUTO_RETRIES of CAD-with-backoff. If the
-        // channel is busy after every retry, we bail with
-        // ERR_CHANNEL_BUSY instead of trampling a neighbour.
-        // Local decision (lowest latency vs P4-managed equivalent).
-        // All channel checks run BEFORE the standby that stages the
-        // TX: standby() aborts an in-progress reception, so the old
-        // order destroyed the very reception it was about to probe.
-        if (primaryRadioRuntime.cad.autoEnabled) {
-            // 2 retries (3 scans total) + tightened jitter caps
-            // worst-case main-loop blocking around ~750 ms.
-            // Important because the loop also drains the UART RX
-            // ring — at 921600 baud the controller can push
-            // ~46 KB/s and our SERIAL_BUFFER_SIZE is 512 B.
-            constexpr uint8_t  CAD_AUTO_RETRIES   = 2;
-            constexpr uint32_t CAD_TIMEOUT_MS     = 200;   // worst-case SF12 ≈ 100 ms
-            bool channel_clear = false;
-            bool reception_busy = false;
-            for (uint8_t attempt = 0; attempt < CAD_AUTO_RETRIES; attempt++) {
-                // Passive guard first: a latched in-progress reception
-                // is authoritative — return busy without a scan, standby,
-                // or RX restart that would abort/discard the frame.
-                if (isReceivingPacket()) {
-                    reception_busy = true;
-                    break;
-                }
-                ChannelScanConfig_t cfg = {};
-                cfg.cad.symNum    = primaryRadioRuntime.cad.symNum;
-                cfg.cad.detPeak   = primaryRadioRuntime.cad.detPeak;
-                cfg.cad.detMin    = primaryRadioRuntime.cad.detMin;
-                cfg.cad.exitMode  = primaryRadioRuntime.cad.exitMode;
-                cfg.cad.irqFlags  = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
-                cfg.cad.irqMask   = RADIOLIB_IRQ_CAD_DEFAULT_MASK;
-                primaryRadioRuntime.clearIrq();
-                if (radio.startChannelScan(cfg) != RADIOLIB_ERR_NONE) {
-                    primaryRadioRuntime.clearIrq();
-                    break;
-                }
-                uint32_t cad_t0 = millis();
-                uint16_t irq = 0;
-                while ((millis() - cad_t0) < CAD_TIMEOUT_MS) {
-                    irq = radio.getIrqFlags();
-                    if (irq & RADIOLIB_SX126X_IRQ_CAD_DONE) break;
-                    compatWdtReset();
-                    delay(2);
-                }
-                radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE |
-                                    RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-                primaryRadioRuntime.clearIrq();
-                // A stale RX_DONE software flag must never count as CAD
-                // completion. Only the chip's CAD_DONE flag proves the scan
-                // finished and makes a clear/busy verdict meaningful.
-                if (!(irq & RADIOLIB_SX126X_IRQ_CAD_DONE)) break;
-                bool busy = (irq & RADIOLIB_SX126X_IRQ_CAD_DETECTED) != 0;
-                if (!busy) { channel_clear = true; break; }
-                // Random backoff 50-200 ms to prevent step-locking with
-                // another sector that retried at the same time. (The old
-                // delay(20 + (millis() & 0x1F)) waited 20-51 ms despite
-                // its comment; micros() is the jitter source because
-                // Arduino random() is unseeded — and identical — on the
-                // nRF52 targets.)
-                delay(50 + (micros() % 150));
-            }
-            // The passive guard already answered without changing radio
-            // state; leave RX and its terminal IRQ untouched for loop().
-            if (reception_busy) {
-                primaryRadioRuntime.txActive = false;
-                sendError(ERR_CHANNEL_BUSY, route);
-                break;
-            }
-            if (!channel_clear) {
-                LOG_R_WARN("auto-CAD: channel busy after retries, abort TX");
-                primaryRadioRuntime.txActive = false;
-                sendError(ERR_CHANNEL_BUSY, route);
-                startReceive();
-                break;
-            }
-        }
-
-        radio.standby();
-        delay(1);
-
-        // If the operator enabled the V4.3 external RX LNA, it must be
-        // treated as an RX-only state. Restore CTX HIGH before TX so the
-        // KCT8103L front-end leaves the receive-LNA path.
-        RFFrontEnd::prepareTransmit();
-
-        primaryRadioRuntime.clearIrq();
-        uint32_t irqStart = primaryRadioRuntime.irqCount();
-        setTxLed(true);
-        int state = radio.startTransmit((uint8_t*)payload, len);
-        LOG_R_INFO("TX_REQUEST len=%u src=%u state=%d",
-                   (unsigned)len, (unsigned)src, state);
-        if (state != RADIOLIB_ERR_NONE) {
-            LOG_R_ERR("startTransmit() failed, state=%d", state);
-            primaryRadioRuntime.txActive = false;
-            radio.finishTransmit();
-            setTxLed(false);
-            sendError(ERR_TX_TIMEOUT, route);
-            startReceive();
-            break;
-        }
-
-        // Worst-case airtime for SF12/BW7.8k at 255 B ≈ 20 s, but the
-        // sector controller upstream caps a per-sector slot at ~4 s.
-        // Aligning closely (4500 ms) so a wedged-radio LOG_R_ERR
-        // ("hard timeout") still reaches the controller right after
-        // its own TIMEOUT log — useful for distinguishing "modem is
-        // stuck waiting on DIO1" from "modem finished but TX_DONE
-        // didn't make it back through UART".
-        const uint32_t TX_TIMEOUT_MS = 4500;
-        uint32_t txStart = millis();
-        while (!primaryRadioRuntime.irqPending() && (millis() - txStart) < TX_TIMEOUT_MS) {
-            compatWdtReset();   // keep watchdog happy while we poll
-            delay(2);
-        }
-
-        bool txOk = primaryRadioRuntime.irqPending();
-        radio.finishTransmit();
-        setTxLed(false);
-        primaryRadioRuntime.clearIrq();
-        primaryRadioRuntime.txActive = false;
-        primaryRadioRuntime.noise.recordPacket(millis());
+        // Only the primary is admitted above while front-end and IRQ are singleton.
+        runRadioTx(primaryRadioHardware, owner, payload, len, route,
+            [] { return isReceivingPacket(); }, [] { return millis(); },
+            [] { return micros(); }, [](unsigned ms) { delay(ms); },
+            [] { compatWdtReset(); },
+            [] { RFFrontEnd::prepareTransmit(); },
+            [](bool on) { setTxLed(on); },
+            [] { return applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD); },
+            [] { startReceive(); },
+            [] {
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
-        lastTxCompleteMs = primaryRadioRuntime.noise.lastPacketMs;
+                lastTxCompleteMs = primaryRadioRuntime.noise.lastPacketMs;
 #endif
-
-        if (txOk) {
-            status.tx_count++;
-            uint32_t airtime_us = radio.getTimeOnAir(len);
-            uint8_t resp[4];
-            resp[0] = airtime_us & 0xFF;
-            resp[1] = (airtime_us >> 8) & 0xFF;
-            resp[2] = (airtime_us >> 16) & 0xFF;
-            resp[3] = (airtime_us >> 24) & 0xFF;
-            sendFrame(CMD_TX_DONE, resp, 4, route);
-            LOG_R_INFO("TX_DONE airtime=%lu us, sent via src=%u",
-                       (unsigned long)airtime_us, (unsigned)src);
-        } else {
-            // Hard TX timeout — the SX1262 is likely stuck in a bad state.
-            // Rebuild from scratch: standby → re-apply full config → RX.
-            LOG_R_ERR("TX hard timeout (%u bytes, dio1_delta=%lu) — resetting radio",
-                      (unsigned)len, (unsigned long)(primaryRadioRuntime.irqCount() - irqStart));
-            radio.standby();
-            delay(5);
-            applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD);
-            sendError(ERR_TX_TIMEOUT, route);
-        }
-        startReceive();
+            },
+            [src, len](RadioTxEvent event, int state, uint32_t detail) {
+                switch (event) {
+                case RadioTxEvent::CadBusy:
+                    LOG_R_WARN("auto-CAD: channel busy after retries, abort TX"); break;
+                case RadioTxEvent::Start:
+                    LOG_R_INFO("TX_REQUEST len=%u src=%u state=%d",
+                               (unsigned)len, (unsigned)src, state); break;
+                case RadioTxEvent::StartFailed:
+                    LOG_R_ERR("startTransmit() failed, state=%d", state); break;
+                case RadioTxEvent::Done:
+                    LOG_R_INFO("TX_DONE airtime=%lu us, sent via src=%u",
+                               (unsigned long)detail, (unsigned)src); break;
+                case RadioTxEvent::Timeout:
+                    LOG_R_ERR("TX hard timeout (%u bytes, dio1_delta=%lu) — resetting radio",
+                              (unsigned)len, (unsigned long)detail); break;
+                }
+            },
+            [](uint8_t response, const uint8_t* bytes, uint16_t size, ResponseRoute replyRoute) {
+                if (response == CMD_ERROR) sendError(bytes[0], replyRoute);
+                else sendFrame(response, bytes, size, replyRoute);
+            });
         break;
     }
 

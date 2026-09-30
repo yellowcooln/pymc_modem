@@ -24,9 +24,10 @@ def main() -> int:
             "// Legacy USB/UART", 1)[0]
         assert "ResponseRoute route)" in dispatcher
         replies = re.findall(r"send(?:Frame|Error)\([^;]*?,\s*(route|src)\);", dispatcher)
-        # CAD replies now pass through the route-preserving radio_cad_owner
-        # callback (exercised by test_radio_cad_owner.py).
-        assert len(replies) >= 37 and set(replies) == {"route"}, (
+        # CAD and TX replies pass through their route-preserving owner
+        # callbacks (exercised by their independent recording-radio tests).
+        assert 'sendFrame(response, bytes, size, replyRoute)' in dispatcher
+        assert len(replies) >= 30 and set(replies) == {"route"}, (
             "Every synchronous command reply (including TX completion and errors) "
             "must retain its ingress route")
         start = main_source.index("static void writeFrame(")

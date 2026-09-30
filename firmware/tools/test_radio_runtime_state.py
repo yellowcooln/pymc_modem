@@ -112,11 +112,9 @@ int main() {
                         "-o", str(directory / "noise_coupling")], check=True)
         subprocess.run([str(directory / "noise_coupling")], check=True)
 
-        # Exercise the production CAD policy setter and TX auto-CAD config.
-        # CAD_REQUEST scan/timeout/recovery now lives in radio_cad_owner.h
-        # and is exercised with two hardware owners by test_radio_cad_owner.py.
+        # Exercise the production CAD policy setter. Auto-CAD is exercised
+        # through the production TX worker by test_radio_tx_owner.py.
         setter = source.split("    case CMD_SET_CAD_PARAMS: {", 1)[1].split("    case ", 1)[0]
-        auto_scan = source.split("                ChannelScanConfig_t cfg = {};", 1)[1].split("                primaryRadioRuntime.clearIrq();", 1)[0]
         cad_coupling = directory / "cad_coupling.cpp"
         cad_coupling.write_text('''#include "radio_runtime_state.h"
 #include <cassert>
@@ -144,21 +142,12 @@ void configure(const uint8_t* payload, int len) {
     case CMD_SET_CAD_PARAMS: {''' + setter + '''
     }
 }
-ChannelScanConfig_t autoScanConfig() {
-    ChannelScanConfig_t cfg = {};
-''' + auto_scan + '''
-    return cfg;
-}
 int main() {
     const uint8_t requested[4] = {4, 31, 12, 1};
     configure(requested, 3);
     assert(errors == 1 && responses == 0 && !primaryRadioRuntime.cad.custom);
     configure(requested, 4);
     assert(responses == 1 && sleeps == 1 && primaryRadioRuntime.cad.custom);
-    auto autoCfg = autoScanConfig();
-    assert(autoCfg.cad.symNum == 4 && autoCfg.cad.detPeak == 31);
-    assert(autoCfg.cad.detMin == 12 && autoCfg.cad.exitMode == 1);
-    assert(autoCfg.cad.irqFlags == 3 && autoCfg.cad.irqMask == 2);
     assert(!second.cad.custom && second.cad.symNum == 1);
 }
 ''')
