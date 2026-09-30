@@ -21,10 +21,11 @@ for declaration in (
     "void prepareStandby();",
 ):
     assert declaration in rf_header
+controller = (FIRMWARE / "include/rf_frontend_controller.h").read_text()
 assert 'STATION_G3_RF_CONFIG_KEY = "g3_rf_cfg"' in rf_source
-assert "p.getUChar(STATION_G3_RF_CONFIG_KEY" in rf_source
-assert "p.putUChar(STATION_G3_RF_CONFIG_KEY, packed)" in rf_source
-assert "setConfiguredLna(stationG3InReceive && stationG3LnaEnabled);" in rf_source
+assert "p.getUChar(key, 0)" in rf_source
+assert "p.putUChar(key, static_cast<uint8_t>(value))" in rf_source
+assert "lnaLevel(inReceive_ && lnaEnabled_);" in controller
 
 power_header = FIRMWARE / "include/station_g3_power.h"
 power_source = FIRMWARE / "src/station_g3_power.cpp"
