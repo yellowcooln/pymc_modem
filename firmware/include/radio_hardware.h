@@ -29,6 +29,8 @@ public:
 // Construction/lifetime of the radio and its Module live together. The
 // dedicated buses on Photon and RAK remain per-instance; other boards borrow
 // global SPI exactly as before (including the current single-radio P4 path).
+// The explicit-bus constructor borrows an externally owned SPIClass, which
+// must outlive this object; it does not affect the legacy primary radio.
 class RadioHardware {
 public:
     explicit RadioHardware(const BoardConfig& pins)
@@ -42,10 +44,26 @@ public:
 #endif
           radio(&module) {}
 
+#ifdef ARDUINO_ARCH_ESP32
+    RadioHardware(const BoardConfig& pins, SPIClass& bus,
+                  int sck, int miso, int mosi, int nss)
+        : pins_(pins), injectedSpi_(&bus),
+          sck_(sck), miso_(miso), mosi_(mosi), nss_(nss),
+          module(nss, pins.pin_lora_dio1, pins.pin_lora_rst,
+                 pins.pin_lora_busy, bus),
+          radio(&module) {}
+#endif
+
     RadioHardware(const RadioHardware&) = delete;
     RadioHardware& operator=(const RadioHardware&) = delete;
 
     void beginSpi() {
+#ifdef ARDUINO_ARCH_ESP32
+        if (injectedSpi_) {
+            injectedSpi_->begin(sck_, miso_, mosi_, nss_);
+            return;
+        }
+#endif
         if (pins_.pin_lora_sck < 0 && pins_.pin_lora_miso < 0 && pins_.pin_lora_mosi < 0)
             return;
 #ifdef ARDUINO_ARCH_ESP32
@@ -66,6 +84,10 @@ public:
 
 private:
     const BoardConfig& pins_;
+#ifdef ARDUINO_ARCH_ESP32
+    SPIClass* injectedSpi_ = nullptr;
+    int sck_ = -1, miso_ = -1, mosi_ = -1, nss_ = -1;
+#endif
 #if defined(BOARD_PHOTON_1W_XIAO_ESP32C6)
     SPIClass loraSpi_{0};
 #elif defined(BOARD_RAK4631_WISMESH_ETH) || defined(BOARD_RAK4631_USB)

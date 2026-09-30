@@ -13,6 +13,7 @@ def main():
         raise SystemExit("g++ is required")
     boards = (
         ("BOARD_ETHERMESH_1W", "ARDUINO_ARCH_ESP32"),
+        ("BOARD_ESP32_P4_NANO", "ARDUINO_ARCH_ESP32"),
         ("BOARD_HELTEC_V3", "ARDUINO_ARCH_ESP32"),
         ("BOARD_PHOTON_1W_XIAO_ESP32C6", "ARDUINO_ARCH_ESP32"),
         ("BOARD_HELTEC_T114", "NRF52"),
