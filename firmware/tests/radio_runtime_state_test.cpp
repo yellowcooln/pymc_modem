@@ -60,7 +60,35 @@ static void independentCadPolicies() {
     assert(second.cad.custom && !second.cad.autoEnabled);
 }
 
+static void independentNoiseSampling() {
+    RadioRuntimeState first, second;
+    assert(first.noise.floorX10() == -990);
+    assert(second.noise.floorX10() == -990);
+    first.noise.recordPacket(1000);
+    assert(!first.noise.canSample(1499));
+    assert(first.noise.canSample(1500));
+    assert(!second.noise.canSample(0));  // boot quiet period
+    assert(second.noise.canSample(500));
+    first.noise.sample(-40.0f, 1500); // valid but clamped at publication
+    assert(!first.noise.canSample(1509));
+    assert(first.noise.canSample(1510));
+    first.noise.sample(-160.0f, 1510); // invalid, no accumulation
+    for (int i = 1; i < 20; ++i) first.noise.sample(-40.0f, 1510 + i * 10);
+    assert(first.noise.floorX10() == -500);
+    assert(second.noise.floorX10() == -990);
+    second.noise.sample(-120.0f, 500);
+    assert(second.noise.floorX10() == -990);
+    second.noise.resetSamples();
+    for (int i = 0; i < 20; ++i) second.noise.sample(-110.0f, 510 + i * 10);
+    assert(second.noise.floorX10() == -1100);
+    assert(first.noise.floorX10() == -500);
+    first.noise.recordPacket(0xFFFFFF00U);
+    assert(!first.noise.canSample(0x000000F3U)); // wraparound, 499 ms
+    assert(first.noise.canSample(0x000000F4U));
+}
+
 int main() {
+    independentNoiseSampling();
     independentIrqsAndRxOwnership();
     legacyStandbyAndTxTransitions();
     independentCadPolicies();

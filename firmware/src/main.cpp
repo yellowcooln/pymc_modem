@@ -340,19 +340,13 @@ OledDisplay oled;
 static RadioConfigState primaryRadioConfig;
 
 static StatusResp  status        = {};
-// One software runtime per radio. RadioLib/SPI and telemetry remain singleton.
+// One software runtime per radio. RadioLib/SPI and status counters remain singleton.
 static RadioRuntimeState primaryRadioRuntime;
 
 // DIO1 is interpreted as RX_DONE outside TX, and as TX_DONE during TX.
 // Each instance owns its own flag and count; callbacks must only touch theirs.
 
 // ─── Noise floor sampling ────────────────────────────────────
-#define NUM_NOISE_FLOOR_SAMPLES 20
-static float    noiseFloor       = -99.0f;
-static float    noiseFloorSum    = 0.0f;
-static int      noiseFloorCount  = 0;
-static uint32_t lastPacketTime   = 0;
-static uint32_t lastNoiseSample  = 0;
 static AgcMaintenance::Schedule agcMaintenanceSchedule;
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
 // openHop repeaters can defer forwarding by several packet airtimes. Keep
@@ -483,7 +477,7 @@ Snapshot capture() {
     snap.status.radio_state = primaryRadioRuntime.txActive ? 1 : 0;
     snap.status.temp_c = RuntimeStatsValues::cpuTemperatureC(
         compatReadCpuTemperature());
-    snap.status.noise_floor_x10 = (int16_t)(noiseFloor * 10.0f);
+    snap.status.noise_floor_x10 = primaryRadioRuntime.noise.floorX10();
     snap.status.battery_mv = BatteryMonitor::readMilliVolts(BOARD.battery);
     snap.radio = primaryRadioConfig.config();
     snap.firmwareVersion = fwVersion;
@@ -967,7 +961,7 @@ void handleLoRaRx() {
     memcpy(rxPayload + 6, rxBuf, len);
 
     broadcastFrame(CMD_RX_PACKET, rxPayload, 6 + len);
-    lastPacketTime = millis();
+    primaryRadioRuntime.noise.recordPacket(millis());
     startReceive();
 }
 
@@ -1138,9 +1132,9 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         setTxLed(false);
         primaryRadioRuntime.clearIrq();
         primaryRadioRuntime.txActive = false;
-        lastPacketTime = millis();
+        primaryRadioRuntime.noise.recordPacket(millis());
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
-        lastTxCompleteMs = lastPacketTime;
+        lastTxCompleteMs = primaryRadioRuntime.noise.lastPacketMs;
 #endif
 
         if (txOk) {
@@ -1312,7 +1306,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_NOISE_REQ: {
-        int16_t nf = (int16_t)(noiseFloor * 10.0f);
+        int16_t nf = primaryRadioRuntime.noise.floorX10();
         uint8_t resp[2];
         resp[0] = nf & 0xFF;
         resp[1] = (nf >> 8) & 0xFF;
@@ -1846,29 +1840,15 @@ void setup() {
 // ─── Noise floor sampling ────────────────────────────────────
 void sampleNoiseFloor() {
     if (!primaryRadioRuntime.ready || primaryRadioRuntime.txActive) return;
-    if (millis() - lastPacketTime < 500) return;
+    if (!primaryRadioRuntime.noise.canSample(millis())) return;
     if (primaryRadioRuntime.irqPending()) return;  // don't read RSSI while an RX packet is incoming
-    if (millis() - lastNoiseSample < 10) return;
-    lastNoiseSample = millis();
 
     // RadioLib's no-arg SX126x::getRSSI() returns the last packet RSSI.
     // For ambient/noise telemetry we must read instantaneous RSSI instead;
     // otherwise a strong RX packet can pin the reported noise floor around
     // that packet's RSSI until another radio state transition clears it.
     float instRssi = radio.getRSSI(false);
-    if (instRssi < -150.0f || instRssi > -30.0f) return;
-
-    noiseFloorCount++;
-    noiseFloorSum += instRssi;
-
-    if (noiseFloorCount >= NUM_NOISE_FLOOR_SAMPLES) {
-        float newFloor = noiseFloorSum / NUM_NOISE_FLOOR_SAMPLES;
-        if (newFloor < -150.0f) newFloor = -150.0f;
-        if (newFloor > -50.0f)  newFloor = -50.0f;
-        noiseFloor = newFloor;
-        noiseFloorSum = 0.0f;
-        noiseFloorCount = 0;
-    }
+    primaryRadioRuntime.noise.sample(instRssi, millis());
 }
 
 void maybeResetAgc() {
@@ -1881,7 +1861,7 @@ void maybeResetAgc() {
     conditions.dio1Pending = primaryRadioRuntime.irqPending();
     conditions.intervalSec = RFFrontEnd::getAgcResetIntervalSec();
     conditions.nowMs = millis();
-    conditions.lastPacketMs = lastPacketTime;
+    conditions.lastPacketMs = primaryRadioRuntime.noise.lastPacketMs;
 
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
     conditions.lastTxCompleteMs = lastTxCompleteMs;
@@ -1915,8 +1895,7 @@ void maybeResetAgc() {
 
     lastSuccessfulAgcResetMs = attemptedAt;
     ++agcResetCount;
-    noiseFloorSum = 0.0f;
-    noiseFloorCount = 0;
+    primaryRadioRuntime.noise.resetSamples();
     if (agcResetCount == 1 ||
         (uint32_t)(attemptedAt - lastAgcSuccessLogMs) >= 60000U) {
         Serial.printf("[AGC] SX1262 AGC reset; RX restarted (count=%lu)\n",
@@ -1935,8 +1914,7 @@ void maybeResetAgc() {
     delay(2);
     startReceive();
     agcMaintenanceSchedule.recordAttempt(millis());
-    noiseFloorSum = 0.0f;
-    noiseFloorCount = 0;
+    primaryRadioRuntime.noise.resetSamples();
     LOG_R_INFO("agc.reset.interval fired after %u s",
                (unsigned)conditions.intervalSec);
 #endif

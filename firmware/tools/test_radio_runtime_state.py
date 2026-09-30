@@ -52,6 +52,56 @@ int main() {
                         "-o", str(directory / "coupling")], check=True)
         subprocess.run([str(directory / "coupling")], check=True)
 
+        # Compile and execute the actual main.cpp sampler with recording
+        # RadioLib/millis boundaries, plus two independent runtime instances.
+        sampler = source.split("void sampleNoiseFloor() {", 1)[1].split("\n}\n", 1)[0]
+        noise_coupling = directory / "noise_coupling.cpp"
+        noise_coupling.write_text('''#include "radio_runtime_state.h"
+#include <cassert>
+#include <cstdint>
+RadioRuntimeState primaryRadioRuntime, second;
+uint32_t clockMs = 0;
+uint32_t millis() { return clockMs; }
+struct RecordingRadio {
+    int reads = 0;
+    float rssi = -100.0f;
+    float getRSSI(bool lastPacket) { assert(!lastPacket); ++reads; return rssi; }
+} radio;
+void sampleNoiseFloor() {''' + sampler + '''\n}
+int main() {
+    primaryRadioRuntime.ready = true;
+    clockMs = 500;
+    sampleNoiseFloor();
+    assert(radio.reads == 1);
+    sampleNoiseFloor();
+    assert(radio.reads == 1);
+    for (int i = 1; i < 20; ++i) { clockMs = 500 + i * 10; sampleNoiseFloor(); }
+    assert(primaryRadioRuntime.noise.floorX10() == -1000);
+    assert(second.noise.floorX10() == -990);
+    primaryRadioRuntime.noise.recordPacket(clockMs);
+    clockMs += 499;
+    sampleNoiseFloor();
+    assert(radio.reads == 20);
+    clockMs++;
+    primaryRadioRuntime.onDio1Rise();
+    sampleNoiseFloor();
+    assert(radio.reads == 20);
+    primaryRadioRuntime.clearIrq();
+    primaryRadioRuntime.txActive = true;
+    sampleNoiseFloor();
+    assert(radio.reads == 20);
+    primaryRadioRuntime.txActive = false;
+    radio.rssi = -120.0f;
+    sampleNoiseFloor();
+    assert(radio.reads == 21);
+    assert(primaryRadioRuntime.noise.floorX10() == -1000);
+}
+''')
+        subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        f"-I{firmware / 'include'}", str(noise_coupling),
+                        "-o", str(directory / "noise_coupling")], check=True)
+        subprocess.run([str(directory / "noise_coupling")], check=True)
+
         # Run the production CAD setters and RadioLib scan-selection block
         # against a recording radio; no physical operation is substituted into
         # main.cpp, only the hardware object is stubbed at the host boundary.
