@@ -5,6 +5,7 @@
 #include "ota_manager.h"
 #include "agc_maintenance.h"
 #include "board_config.h"
+#include "effective_tcp_port.h"
 #include "ethernet_manager.h"
 #include "gps_manager.h"
 #include "net_filter.h"
@@ -220,10 +221,11 @@ static WebUiShared::Model buildWebUiModel() {
 #endif
     model.capabilities.gps = GPSManager::hasGpsPins();
     model.capabilities.battery = BOARD.battery.pin >= 0 || BOARD.battery.fuel_gauge_i2c_addr != 0;
-    model.capabilities.radio = true;
+    model.capabilities.radio = BOARD.has_lora_radio;
     model.capabilities.updateAvailable = true;
     model.capabilities.httpFirmwareUpload = true;
     model.capabilities.writableManagement = true;
+    model.capabilities.fixedTcpPort = duoDiagnosticTcpPort;
     model.capabilities.exposeTcpToken = true;
 
     model.network.interfaceName = net.iface;
@@ -248,7 +250,7 @@ static WebUiShared::Model buildWebUiModel() {
     model.config.gateway = (uint32_t)cfg.gateway ? cfg.gateway.toString().c_str() : "";
     model.config.dns1 = (uint32_t)cfg.dns1 ? cfg.dns1.toString().c_str() : "";
     model.config.dns2 = (uint32_t)cfg.dns2 ? cfg.dns2.toString().c_str() : "";
-    model.config.tcpPort = cfg.tcpPort;
+    model.config.tcpPort = effectiveTcpPort(cfg.tcpPort);
     model.config.tcpTokenSet = cfg.tcpToken.length() > 0;
     model.config.tcpToken = cfg.tcpToken.c_str();
     model.config.wifiExternalAntenna = cfg.wifiExternalAntenna;
@@ -307,7 +309,7 @@ static WebUiShared::Model buildWebUiModel() {
         model.gps.satellites.push_back(satellite);
     }
 
-    model.radio.available = true;
+    model.radio.available = BOARD.has_lora_radio;
     model.radio.state = radioStateLabel(snap);
     model.radio.standby = snap.radioStandby;
     model.radio.autoCadEnabled = snap.autoCadEnabled;
@@ -456,6 +458,7 @@ static String buildSystemJson(const RuntimeStats::Snapshot& snap,
 }
 
 static String buildRadioJson(const RuntimeStats::Snapshot& snap) {
+    if (duoDiagnosticTcpPort) return F("{\"available\":false}");
     String body;
     body.reserve(512);
     body += F("{\"state\":");
@@ -559,7 +562,7 @@ static String buildNetworkJson(const WifiManager::Config& cfg,
         body += String(net.wifi_rssi_dbm);
     }
     body += F(",\"tcp_port\":");
-    body += String(cfg.tcpPort);
+    body += String(effectiveTcpPort(cfg.tcpPort));
     body += F(",\"token_set\":");
     body += boolJson(cfg.tcpToken.length() > 0);
     body += F(",\"saved\":{");
@@ -587,7 +590,7 @@ static String buildConfigJson(const WifiManager::Config& cfg) {
     body += F(",\"tcp_token\":");
     body += jsonQuote(cfg.tcpToken);
     body += F(",\"tcp_port\":");
-    body += String(cfg.tcpPort);
+    body += String(effectiveTcpPort(cfg.tcpPort));
     body += F(",\"use_static_ip\":");
     body += boolJson(cfg.useStaticIP);
     body += F(",\"static_ip\":");
@@ -739,6 +742,10 @@ static bool applyConfigPatch(JsonVariantConst root,
 
     JsonVariantConst portVal = obj["tcp_port"];
     if (!portVal.isNull()) {
+        if (duoDiagnosticTcpPort && (!portVal.is<uint16_t>() || !acceptsTcpPort(portVal.as<uint16_t>()))) {
+            error = "TCP port is fixed at 5055 on EtherMesh-Duo.";
+            return false;
+        }
         rebootRequired = true;
         if (!portVal.is<uint16_t>()) {
             error = "tcp_port must be an integer.";
@@ -1502,6 +1509,12 @@ static void handleHostnameSave() {
 
 static void handleNetworkSave() {
     if (!checkAuth()) return;
+
+    if (duoDiagnosticTcpPort && httpServer->hasArg("port") &&
+        httpServer->arg("port") != "5055") {
+        httpServer->send(400, "text/plain", "TCP port is fixed at 5055 on EtherMesh-Duo.\n");
+        return;
+    }
 
     WifiManager::Config cfg = WifiManager::getConfig();
     cfg.useStaticIP = httpServer->hasArg("static");

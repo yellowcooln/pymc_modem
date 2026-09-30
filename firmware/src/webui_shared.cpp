@@ -205,7 +205,12 @@ std::string renderRootPage(const Model& m) {
     if (m.capabilities.wifi) {
         body += "<div class='checkline'><input type='checkbox' id='wifi_ps' name='wifi_ps' value='1'" + std::string(m.config.wifiPowerSave ? " checked" : "") + "><label for='wifi_ps' title='Disable for lower latency, higher power draw'>Wi-Fi power save</label></div>";
     }
-    body += "<label>openHop TCP port</label><input type='number' name='port' min='1' max='65535' value='" + number(m.config.tcpPort) + "'><p class='m'>Port 80 is reserved for this management server.</p><button type='submit'>Save network settings</button></form></div></details>";
+    if (m.capabilities.fixedTcpPort) {
+        body += "<p class='m'>Fixed diagnostic TCP port: " + number(m.config.tcpPort) + "</p>";
+    } else {
+        body += "<label>openHop TCP port</label><input type='number' name='port' min='1' max='65535' value='" + number(m.config.tcpPort) + "'><p class='m'>Port 80 is reserved for this management server.</p>";
+    }
+    body += "<button type='submit'>Save network settings</button></form></div></details>";
     }
     if (m.capabilities.stationAgcControls && m.capabilities.writableManagement) {
         body += "<details open><summary>Station AGC Recovery</summary><div class='inside'>"

@@ -20,6 +20,7 @@ struct Capabilities {
     bool updateAvailable = false;
     bool httpFirmwareUpload = false;
     bool writableManagement = false;
+    bool fixedTcpPort = false; // diagnostic Duo port cannot be configured
     bool exposeTcpToken = false;
     bool bleDfu = false;
 };

@@ -24,6 +24,7 @@
 #include "radio_cad_owner.h"
 #include "radio_tx_owner.h"
 #include "board_config.h"
+#include "effective_tcp_port.h"
 #include "radio_hardware.h"
 #include "radio_initialization.h"
 #include "rak3401_ready_led.h"
@@ -758,7 +759,7 @@ static uint16_t buildWifiStatusPayload(uint8_t* out) {
     out[i++] = ip[2];
     out[i++] = ip[3];
 
-    uint16_t port = WifiManager::getConfig().tcpPort;
+    uint16_t port = effectiveTcpPort(WifiManager::getConfig().tcpPort);
     out[i++] = port & 0xFF;
     out[i++] = (port >> 8) & 0xFF;
 
@@ -805,6 +806,7 @@ static bool parseSetWifi(const uint8_t* p, uint16_t len, WifiManager::Config& ou
     uint16_t port = p[i] | ((uint16_t)p[i+1] << 8);
     i += 2;
     if (port == 0) return false;
+    if (duoDiagnosticTcpPort && !acceptsTcpPort(port)) return false;
     out.tcpPort = port;
 
     if (i + 1 > len) return false;
@@ -866,6 +868,7 @@ bool applyConfig(RadioHardware& hardware, RadioConfigState& config,
 }
 
 bool startReceive() {
+    if (!BOARD.has_lora_radio) return false; // no hardware construction on no-RF boards
     // Only the primary owns the singleton RF front end. Do not attach a
     // secondary RX listener until front-end and TX/IRQ ownership are isolated.
     return startRadioReceive(primaryRadioHardwareInstance(), primaryRadioRuntime,
@@ -1550,9 +1553,9 @@ void setup() {
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || duoDiagnosticTcpPort) ? wcfg.tcpToken : String();
 #endif
-        uint16_t port = BOARD.has_lora_radio ? (wcfg.tcpPort ? wcfg.tcpPort : 5055) : 5055;
+        uint16_t port = effectiveTcpPort(wcfg.tcpPort ? wcfg.tcpPort : 5055);
         TCPServer::begin(port, token);
         tcpStarted = true;
 
@@ -1754,9 +1757,9 @@ void loop() {
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || duoDiagnosticTcpPort) ? wcfg.tcpToken : String();
 #endif
-        uint16_t port = BOARD.has_lora_radio ? (wcfg.tcpPort ? wcfg.tcpPort : 5055) : 5055;
+        uint16_t port = effectiveTcpPort(wcfg.tcpPort ? wcfg.tcpPort : 5055);
         TCPServer::begin(port, token);
         tcpStarted = true;
     }
@@ -1765,7 +1768,7 @@ void loop() {
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || duoDiagnosticTcpPort) ? wcfg.tcpToken : String();
 #endif
         OTAManager::begin(deviceHostname, token);
         otaStarted = true;

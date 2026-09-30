@@ -11,8 +11,21 @@ assert main.index('rejectUnavailableRadioCommand(cmd, BOARD.has_lora_radio') < m
 assert 'static RadioHardware hardware(BOARD);' in main
 assert 'static RadioHardware primaryRadioHardware(BOARD)' not in main
 assert 'OpenHopSX1262& radio =' not in main
-assert main.count('uint16_t port = BOARD.has_lora_radio ? (wcfg.tcpPort ? wcfg.tcpPort : 5055) : 5055;') == 2
-assert 'String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();' in main
+assert main.count('uint16_t port = effectiveTcpPort(wcfg.tcpPort ? wcfg.tcpPort : 5055);') == 2
+assert 'String token = (BOARD.has_wifi || duoDiagnosticTcpPort) ? wcfg.tcpToken : String();' in main
+assert 'if (duoDiagnosticTcpPort && !acceptsTcpPort(port)) return false;' in main
+assert 'uint16_t port = effectiveTcpPort(WifiManager::getConfig().tcpPort);' in main
+rx = main.split('bool startReceive() {', 1)[1].split('\n}', 1)[0]
+assert rx.index('if (!BOARD.has_lora_radio) return false;') < rx.index('primaryRadioHardwareInstance()')
+ota = (fw / 'src/ota_manager.cpp').read_text()
+assert 'model.capabilities.radio = BOARD.has_lora_radio;' in ota
+assert 'model.radio.available = BOARD.has_lora_radio;' in ota
+assert 'model.capabilities.fixedTcpPort = duoDiagnosticTcpPort;' in ota
+assert 'model.config.tcpPort = effectiveTcpPort(cfg.tcpPort);' in ota
+assert ota.count('body += String(effectiveTcpPort(cfg.tcpPort));') == 2
+assert 'if (duoDiagnosticTcpPort && (!portVal.is<uint16_t>() || !acceptsTcpPort(portVal.as<uint16_t>())))' in ota
+assert 'if (duoDiagnosticTcpPort && httpServer->hasArg("port")' in ota
+assert 'if (duoDiagnosticTcpPort) return F("{\\"available\\":false}");' in ota
 board = (fw / 'include/boards/ethermesh_duo.h').read_text()
 assert 'RF1 schematic: NSS20 SCK21 MOSI22 MISO23 RST26 ANT_SW27 BUSY32 DIO1 33' in board
 assert 'RF2 schematic (not configured): DIO1=5 BUSY=6 RST=14 NSS=15' in board
@@ -62,4 +75,10 @@ int main() {
 ''')
     subprocess.run(['g++', '-std=c++17', '-DBOARD_ETHERMESH_DUO', '-I'+str(fw/'include'), str(cpp), '-o', str(Path(td)/'test')], check=True)
     subprocess.run([str(Path(td)/'test')], check=True)
+    for board_macro in ('BOARD_ETHERMESH_DUO', 'BOARD_ETHERMESH_1W', 'BOARD_ESP32_P4_NANO'):
+        exe = str(Path(td) / board_macro)
+        subprocess.run(['g++', '-std=c++17', '-D'+board_macro,
+                        '-I'+str(fw/'include'), str(fw/'src/webui_shared.cpp'),
+                        str(fw/'tests/duo_tcp_policy_test.cpp'), '-o', exe], check=True)
+        subprocess.run([exe], check=True)
 print('Duo no-radio admission and board contract OK')
