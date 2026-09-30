@@ -10,8 +10,8 @@ def main():
     firmware = pathlib.Path(__file__).resolve().parents[1]
     source = (firmware / "src" / "main.cpp").read_text()
     start = source.split("bool startReceive() {", 1)[1].split("// ─── Endpoint-owned radio queries", 1)[0]
-    assert "startRadioReceive(primaryRadioHardware, primaryRadioRuntime" in start
-    assert "handleRadioRx(primaryRadioHardware, owner" in start
+    assert "startRadioReceive(primaryRadioHardwareInstance(), primaryRadioRuntime" in start
+    assert "handleRadioRx(primaryRadioHardwareInstance(), owner" in start
     assert "broadcastFrame(cmd, payload, len, origin)" in start
     assert "RFFrontEnd::prepareReceive()" in start
     assert "RadioCommandContext owner{0, 0, primaryRadioConfig, primaryRadioRuntime, status}" in start

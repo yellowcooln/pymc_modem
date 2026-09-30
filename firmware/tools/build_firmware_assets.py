@@ -199,14 +199,8 @@ def run(cmd: list[str], cwd: Path = ROOT) -> str:
 
 
 def discover_envs() -> list[str]:
-    envs: list[str] = []
-    for line in PLATFORMIO_INI.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[env:") and stripped.endswith("]"):
-            envs.append(stripped[len("[env:"):-1])
-    if not envs:
-        raise SystemExit(f"No [env:<name>] blocks found in {PLATFORMIO_INI}")
-    return envs
+    from release_envs import discover_release_envs
+    return discover_release_envs(PLATFORMIO_INI)
 
 
 def git_changed_files(base: str | None, head: str | None) -> list[str]:

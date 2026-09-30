@@ -29,15 +29,8 @@ def sha256_file(path: Path) -> str:
 
 
 def discover_platformio_envs() -> list[str]:
-    platformio_ini = FIRMWARE / "platformio.ini"
-    envs: list[str] = []
-    for line in platformio_ini.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[env:") and stripped.endswith("]"):
-            envs.append(stripped[len("[env:"):-1])
-    if not envs:
-        raise SystemExit(f"No [env:<name>] blocks found in {platformio_ini}")
-    return envs
+    from release_envs import discover_release_envs
+    return discover_release_envs(FIRMWARE / "platformio.ini")
 
 
 def discover_asset_dirs() -> list[Path]:

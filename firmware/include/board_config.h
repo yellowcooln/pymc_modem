@@ -184,8 +184,8 @@ struct BoardConfig {
     // Some carriers (ESP32-P4-Nano) ship without an SX1262 — the
     // module is added later. When false, main.cpp / wifi_manager skip
     // every radio code path: no SX1262 init, no SET_CONFIG, no CAD,
-    // no RX worker. CMD_GET_CONFIG / CMD_STATUS still answer with
-    // current cached state so openHop Repeater can probe the modem.
+    // no RX worker. Radio queries/commands return ERR_NO_RADIO;
+    // transport/identity queries (PING, GET_VERSION, GET_WIFI) remain live.
     bool has_lora_radio;
 
     // ESP32-P4 has no native Wi-Fi/BT — it relies on an ESP32-C6
@@ -307,6 +307,8 @@ extern const BoardConfig BOARD;
 #  include "boards/esp32_p4_nano.h"
 #elif defined(BOARD_ETHERMESH_1W)
 #  include "boards/ethermesh_1w.h"
+#elif defined(BOARD_ETHERMESH_DUO)
+#  include "boards/ethermesh_duo.h"
 #elif defined(BOARD_HELTEC_T114)
 #  include "boards/heltec_t114.h"
 #elif defined(BOARD_HELTEC_TRACKER_V2)

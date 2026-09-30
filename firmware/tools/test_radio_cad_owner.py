@@ -8,7 +8,7 @@ import tempfile
 firmware = Path(__file__).resolve().parents[1]
 source = (firmware / 'src/main.cpp').read_text()
 assert '#include "radio_cad_owner.h"' in source
-assert 'runRadioCad(primaryRadioHardware, owner, route,' in source
+assert 'runRadioCad(primaryRadioHardwareInstance(), owner, route,' in source
 assert 'RFFrontEnd::prepareReceive()' in source
 with tempfile.TemporaryDirectory(prefix='openhop-cad-') as tmp:
     binary = Path(tmp) / 'test'

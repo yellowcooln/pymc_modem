@@ -8,10 +8,10 @@ import tempfile
 firmware = Path(__file__).resolve().parents[1]
 source = (firmware / 'src/main.cpp').read_text()
 assert '#include "radio_tx_owner.h"' in source
-assert 'runRadioTx(primaryRadioHardware, owner, payload, len, route,' in source
+assert 'runRadioTx(primaryRadioHardwareInstance(), owner, payload, len, route,' in source
 assert 'owner.radioId != 0 && cmd != CMD_GET_CONFIG' in source
 assert 'RFFrontEnd::prepareTransmit()' in source
-assert 'applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD)' in source
+assert 'applyConfig(primaryRadioHardwareInstance(), primaryRadioConfig, BOARD)' in source
 assert 'startReceive();' in source
 assert 'sendFrame(response, bytes, size, replyRoute)' in source
 with tempfile.TemporaryDirectory(prefix='openhop-tx-') as tmp:

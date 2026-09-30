@@ -30,6 +30,16 @@ your board:
 | Seeed XIAO nRF52840 + Wio-SX1262 | `xiao_nrf52_wio` | n/a | none — USB-CDC only |
 | RAKwireless RAK3401 (RAK13302 1 W front end) | `rak3401` | n/a | none — USB-CDC only |
 
+**EtherMesh-Duo is not an operating modem target.** `ethermesh_duo` is a
+source-only, diagnostic **non-RF** ESP32-P4 Ethernet build. Its two RAK13302
+footprints have unverified fitted power/frequency variants and power path.
+It does not initialize SPI/radio/IRQ/ANT_SW GPIO, cannot RX/CAD/TX, and
+rejects radio commands with `ERR_NO_RADIO`. Only the primary authenticated
+TCP listener on fixed port 5055 is available (plus existing management
+services); saved TCP tokens remain enforced. No secondary listener is started.
+Do not flash or publish this as ready-to-flash operating modem firmware.
+Physical bring-up requires separate schematic/power/RF validation and approval.
+
 The `esp32_p4_nano`, `ethermesh_1w`, `station_g2`, `station_g3`, and `photon_1w_xiao_esp32c6` envs use the
 [pioarduino fork](https://github.com/pioarduino/platform-espressif32)
 (pinned in `platformio.ini`) for the Arduino-ESP32 3.x / ESP-IDF 5.x

@@ -102,9 +102,9 @@ set_body = main.split('case CMD_SET_CONFIG: {', 1)[1].split('case CMD_GET_WIFI:'
 assert 'applyRadioConfig(hardware.radio, config.config(), board.max_tx_power_dbm,' in apply_body
 assert 'PrimaryPowerDiagnostics{board}' in apply_body
 assert 'owner.config.setFromWire(payload, len)' in set_body
-assert 'applyRadioConfig(primaryRadioHardware.radio, requested, BOARD.max_tx_power_dbm,' in set_body
+assert 'applyRadioConfig(primaryRadioHardwareInstance().radio, requested, BOARD.max_tx_power_dbm,' in set_body
 assert 'PrimaryPowerDiagnostics{BOARD}' in set_body
-assert set_body.index('owner.config.setFromWire(payload, len)') < set_body.index('LOG_R_INFO("SET_CONFIG recv') < set_body.index('applyRadioConfig(primaryRadioHardware.radio')
+assert set_body.index('owner.config.setFromWire(payload, len)') < set_body.index('LOG_R_INFO("SET_CONFIG recv') < set_body.index('applyRadioConfig(primaryRadioHardwareInstance().radio')
 for field in ('freq=%lu', 'bw=%lu', 'sf=%u', 'cr=%u', 'pwr_req=%d', 'sync=0x%04X', 'pre=%u'):
     assert field in set_body
 for field in ('setOutputPower=%d', 'ocp_before=%dmA', 'ocp_after=%dmA'):

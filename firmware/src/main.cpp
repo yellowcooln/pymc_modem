@@ -19,6 +19,7 @@
 #include "radio_runtime_state.h"
 #include "radio_irq_owner.h"
 #include "radio_command_context.h"
+#include "radio_command_admission.h"
 #include "radio_rx_owner.h"
 #include "radio_cad_owner.h"
 #include "radio_tx_owner.h"
@@ -31,7 +32,7 @@
 #include "response_route.h"
 #include "compat.h"
 #include "rf_frontend.h"
-#if defined(BOARD_ETHERMESH_1W)
+#if defined(BOARD_ETHERMESH_1W) || defined(BOARD_ETHERMESH_DUO)
 // Compile the dormant RAK13302 policy without constructing or enabling it.
 #include "rak13302_frontend_policy.h"
 #endif
@@ -300,10 +301,15 @@ static String fwVersion;   // populated in setup()
 static constexpr uint32_t LOOP_WDT_TIMEOUT_S = 30;
 
 // ─── Hardware setup ──────────────────────────────────────────
-// Transitional alias: all current call sites still use the original radio.
+// Existing call sites still use the original primary radio.
 // A later step can route each transport/runtime to its own hardware instance.
-static RadioHardware primaryRadioHardware(BOARD);
-OpenHopSX1262& radio = primaryRadioHardware.radio;
+// Delay Module/SX1262 construction until a radio path is actually entered.
+// The Duo diagnostic never enters one and therefore constructs neither.
+static RadioHardware& primaryRadioHardwareInstance() {
+    static RadioHardware hardware(BOARD);
+    return hardware;
+}
+static OpenHopSX1262& primaryRadio() { return primaryRadioHardwareInstance().radio; }
 
 // Single instance regardless of build — on ESP32 this is the real
 // SSD1306 driver from oled_display.cpp; on nRF52 it's a no-op stub
@@ -352,7 +358,7 @@ static bool     rxHeaderSeen = false;
 // header airtime, a valid header into a frame within a worst-case payload
 // airtime.
 static bool isReceivingPacket() {
-    uint32_t irq = radio.getIrqFlags();
+    uint32_t irq = primaryRadio().getIrqFlags();
     bool header   = (irq & RADIOLIB_SX126X_IRQ_HEADER_VALID) != 0;
     bool preamble = (irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) != 0;
     uint32_t now = millis();
@@ -367,9 +373,9 @@ static bool isReceivingPacket() {
     if (header) {
         if (!rxHeaderSeen) { rxHeaderSeen = true; rxActivityAt = now; }
         // Worst-case airtime of a max-size frame at current settings, padded 50%.
-        uint32_t maxMs = (uint32_t)(radio.getTimeOnAir(MAX_LORA_PAYLOAD) / 1000) * 3 / 2 + 100;
+        uint32_t maxMs = (uint32_t)(primaryRadio().getTimeOnAir(MAX_LORA_PAYLOAD) / 1000) * 3 / 2 + 100;
         if (now - rxActivityAt > maxMs) {
-            radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED |
+            primaryRadio().clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED |
                                 RADIOLIB_SX126X_IRQ_HEADER_VALID);
             rxActivityAt = 0;
             rxHeaderSeen = false;
@@ -379,9 +385,9 @@ static bool isReceivingPacket() {
     }
     if (preamble) {
         if (rxActivityAt == 0) rxActivityAt = now;
-        uint32_t preMs = (uint32_t)(radio.getTimeOnAir(1) / 1000) * 3 / 2 + 100;
+        uint32_t preMs = (uint32_t)(primaryRadio().getTimeOnAir(1) / 1000) * 3 / 2 + 100;
         if (now - rxActivityAt > preMs) {
-            radio.clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED);
+            primaryRadio().clearIrqFlags(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED);
             rxActivityAt = 0;
             return false;
         }
@@ -862,14 +868,14 @@ bool applyConfig(RadioHardware& hardware, RadioConfigState& config,
 bool startReceive() {
     // Only the primary owns the singleton RF front end. Do not attach a
     // secondary RX listener until front-end and TX/IRQ ownership are isolated.
-    return startRadioReceive(primaryRadioHardware, primaryRadioRuntime,
+    return startRadioReceive(primaryRadioHardwareInstance(), primaryRadioRuntime,
                              [] { RFFrontEnd::prepareReceive(); });
 }
 
 // ─── Handle received LoRa packet ────────────────────────────
 void handleLoRaRx() {
     RadioCommandContext owner{0, 0, primaryRadioConfig, primaryRadioRuntime, status};
-    handleRadioRx(primaryRadioHardware, owner,
+    handleRadioRx(primaryRadioHardwareInstance(), owner,
         [] { RFFrontEnd::prepareReceive(); },
         [](const RadioConfig& cfg, int16_t rssi, int16_t snr) {
             oled.setRadioInfo(cfg.freq_hz, cfg.sf, cfg.bandwidth_hz, cfg.cr,
@@ -958,31 +964,24 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     if (dispatchRadioQuery(cmd, payload, len, route, owner)) return;
 
     // Boards without a LoRa radio, or boards where SX1262 init failed,
-    // ack the non-radio commands (PING, GET_VERSION, GET_WIFI, AUTH, …)
+    // answer non-radio commands (PING, GET_VERSION, GET_WIFI, AUTH, …)
     // but refuse anything that would touch the SX1262. The host can still
     // probe the modem and configure Wi-Fi via the existing flow.
-    if (!BOARD.has_lora_radio || !primaryRadioRuntime.ready) {
-        switch (cmd) {
-        case CMD_TX_REQUEST:  case CMD_SET_CONFIG:  case CMD_CAD_REQUEST:
-        case CMD_RX_START:    case CMD_SET_CAD_PARAMS:
-            sendError(ERR_NO_RADIO, route);
-            return;
-        default:
-            break;  // PING / GET_VERSION / WiFi / AUTH stay live
-        }
-    }
+    if (rejectUnavailableRadioCommand(cmd, BOARD.has_lora_radio,
+                                      primaryRadioRuntime.ready,
+                                      [route](uint8_t error) { sendError(error, route); })) return;
 
     switch (cmd) {
 
     case CMD_TX_REQUEST: {
         // Only the primary is admitted above while front-end and IRQ are singleton.
-        runRadioTx(primaryRadioHardware, owner, payload, len, route,
+        runRadioTx(primaryRadioHardwareInstance(), owner, payload, len, route,
             [] { return isReceivingPacket(); }, [] { return millis(); },
             [] { return micros(); }, [](unsigned ms) { delay(ms); },
             [] { compatWdtReset(); },
             [] { RFFrontEnd::prepareTransmit(); },
             [](bool on) { setTxLed(on); },
-            [] { return applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD); },
+            [] { return applyConfig(primaryRadioHardwareInstance(), primaryRadioConfig, BOARD); },
             [] { startReceive(); },
             [] {
 #if defined(BOARD_STATION_G2) || defined(BOARD_STATION_G3)
@@ -1014,11 +1013,11 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_CAD_REQUEST: {
-        runRadioCad(primaryRadioHardware, owner, route,
+        runRadioCad(primaryRadioHardwareInstance(), owner, route,
             [] { return isReceivingPacket(); }, [] { return millis(); },
             [](unsigned ms) { delay(ms); }, [] { compatWdtReset(); },
             [] { LOG_R_WARN("CAD IRQ timeout — resetting radio");
-                 return applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD); },
+                 return applyConfig(primaryRadioHardwareInstance(), primaryRadioConfig, BOARD); },
             [] { startReceive(); },
             [](uint8_t response, uint8_t value, ResponseRoute replyRoute) {
                 if (response == CMD_ERROR) sendError(value, replyRoute);
@@ -1064,7 +1063,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                    (unsigned long)requested.freq_hz, (unsigned long)requested.bandwidth_hz,
                    (unsigned)requested.sf, (unsigned)requested.cr, (int)requested.power_dbm,
                    (unsigned)requested.syncword, (unsigned)requested.preamble_len);
-        if (applyRadioConfig(primaryRadioHardware.radio, requested, BOARD.max_tx_power_dbm,
+        if (applyRadioConfig(primaryRadioHardwareInstance().radio, requested, BOARD.max_tx_power_dbm,
                              PrimaryPowerDiagnostics{BOARD})) {
             showAppliedConfig(owner.config.config(), BOARD);
             sendFrame(CMD_CONFIG_RESP, owner.config.wireData(), sizeof(RadioConfig), route);
@@ -1170,7 +1169,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
     case CMD_RADIO_STANDBY: {
         RFFrontEnd::prepareStandby();
-        radio.standby();
+        primaryRadio().standby();
         primaryRadioRuntime.standby = true;
         oled.setStandby(true);
 #if defined(BOARD_HELTEC_T114)
@@ -1187,7 +1186,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #if defined(BOARD_HELTEC_T114)
         NodeState::setStandby(false);
 #endif
-        bool ok = applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD) && startReceive();
+        bool ok = applyConfig(primaryRadioHardwareInstance(), primaryRadioConfig, BOARD) && startReceive();
         LOG_R_INFO("radio RESUME (ok=%d)", (int)ok);
         uint8_t status = ok ? 0 : 1;
         sendFrame(CMD_RADIO_RESUME_RESP, &status, 1, route);
@@ -1425,11 +1424,8 @@ void setup() {
     configureStaticGpios();
 
     // ─── SX1262 init (skipped when board has no LoRa hardware) ──
-    // ESP32-P4-NANO ships without a LoRa front end on day one — the
-    // module is added later. Until then BOARD.has_lora_radio == false
-    // and the firmware runs as a plain openHop Repeater bridge over
-    // Wi-Fi / Ethernet, returning ERR_NO_RADIO for radio commands so
-    // the host can still probe the modem.
+    // Boards without a verified radio (including EtherMesh-Duo diagnostics)
+    // keep RF GPIO, SPI, IRQ and SX1262 untouched and answer ERR_NO_RADIO.
     if (BOARD.has_lora_radio) {
         // Bring up the SPI bus for the SX1262 BEFORE radio.begin(). When
         // BOARD.pin_lora_sck/miso/mosi are -1 the board variant's default
@@ -1438,7 +1434,7 @@ void setup() {
         // board has remapped SPI (LilyGO T3-S3 etc.) and we must call
         // SPI.begin() with the explicit pins or RadioLib's first SPI
         // transfer fails.
-        primaryRadioHardware.beginSpi();
+        primaryRadioHardwareInstance().beginSpi();
 
         LOG_R_INFO("radio.begin nss=%d dio1=%d rst=%d busy=%d spi=(%d,%d,%d)",
                    (int)BOARD.pin_lora_nss, (int)BOARD.pin_lora_dio1,
@@ -1451,7 +1447,7 @@ void setup() {
         const float initialTcxoVoltage = BOARD.use_dio3_tcxo
                                              ? BOARD.tcxo_voltage
                                              : 0.0f;
-        int state = radio.begin(434.0f, 125.0f, 9, 7,
+        int state = primaryRadio().begin(434.0f, 125.0f, 9, 7,
                                 RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
                                 10, 8, initialTcxoVoltage);
         LOG_R_INFO("radio.begin (TCXO=%.1f V) -> %d", initialTcxoVoltage, state);
@@ -1462,10 +1458,10 @@ void setup() {
             Serial.println("[BOOT] SX1262 init failed — continuing with Wi-Fi/config portal only");
             primaryRadioRuntime.ready = false;
         } else {
-        configureRadioRfSwitch(primaryRadioHardware.radio, BOARD.rf_switch, Serial);
-        configureRadioSx126xOptions(primaryRadioHardware.radio, BOARD, Serial);
+        configureRadioRfSwitch(primaryRadioHardwareInstance().radio, BOARD.rf_switch, Serial);
+        configureRadioSx126xOptions(primaryRadioHardwareInstance().radio, BOARD, Serial);
 
-        if (!applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD)) {
+        if (!applyConfig(primaryRadioHardwareInstance(), primaryRadioConfig, BOARD)) {
             oled.showError("Config fail!");
             sendError(ERR_INVALID_CONFIG, TransportSource::USB);
             while (true) delay(1000);
@@ -1478,7 +1474,7 @@ void setup() {
             oled.showError("IRQ owner conflict!");
             while (true) delay(1000);
         }
-        radio.setDio1Action(onDio1Rise);
+        primaryRadio().setDio1Action(onDio1Rise);
         LOG_R_INFO("DIO1 IRQ attached on GPIO%d", (int)BOARD.pin_lora_dio1);
 
         if (!startReceive()) {
@@ -1491,7 +1487,7 @@ void setup() {
         startRak3401ReadyLedHeartbeat();
         }
     } else {
-        Serial.println("[BOOT] no LoRa radio on this board — running as Wi-Fi/Ethernet bridge only");
+        Serial.println("[BOOT] no LoRa radio enabled — diagnostic transport only, no RF");
         primaryRadioRuntime.ready = false;
     }
 
@@ -1550,15 +1546,13 @@ void setup() {
     bool netUp = WifiManager::isSTAConnected() || EthernetManager::hasIP();
     if (netUp) {
         const auto& wcfg = WifiManager::getConfig();
-        // Diagnostic mode (has_wifi == false): ignore the saved token
-        // so we can probe the TCP server without re-authenticating.
-        // Restore normal auth once Wi-Fi comes back.
+        // A no-radio Ethernet target still enforces the saved TCP token.
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = BOARD.has_wifi ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
 #endif
-        uint16_t port = wcfg.tcpPort ? wcfg.tcpPort : 5055;
+        uint16_t port = BOARD.has_lora_radio ? (wcfg.tcpPort ? wcfg.tcpPort : 5055) : 5055;
         TCPServer::begin(port, token);
         tcpStarted = true;
 
@@ -1624,7 +1618,7 @@ void sampleNoiseFloor() {
     // otherwise a strong RX packet can pin the reported noise floor around
     // that packet's RSSI until another radio state transition clears it.
     const uint32_t sampleStartedAt = millis();
-    float instRssi = radio.getRSSI(false);
+    float instRssi = primaryRadio().getRSSI(false);
     primaryRadioRuntime.noise.sample(instRssi, sampleStartedAt);
 }
 
@@ -1654,8 +1648,8 @@ void maybeResetAgc() {
     const auto result = AgcMaintenance::run(
         RADIOLIB_ERR_NONE,
         []() { RFFrontEnd::prepareStandby(); },
-        []() { return radio.standby(); },
-        []() { return radio.resetAGC(); },
+        []() { return primaryRadio().standby(); },
+        []() { return primaryRadio().resetAGC(); },
         []() { return startReceive(); });
     const uint32_t attemptedAt = millis();
     agcMaintenanceSchedule.recordAttempt(attemptedAt);
@@ -1687,7 +1681,7 @@ void maybeResetAgc() {
     // out-of-band interference. A brief RX restart mirrors the
     // agc.reset.interval behaviour used by LoRa firmwares such as
     // MeshCore/Meshtastic without disturbing TX or packet IRQ handling.
-    radio.standby();
+    primaryRadio().standby();
     delay(2);
     startReceive();
     agcMaintenanceSchedule.recordAttempt(millis());
@@ -1760,9 +1754,9 @@ void loop() {
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = BOARD.has_wifi ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
 #endif
-        uint16_t port = wcfg.tcpPort ? wcfg.tcpPort : 5055;
+        uint16_t port = BOARD.has_lora_radio ? (wcfg.tcpPort ? wcfg.tcpPort : 5055) : 5055;
         TCPServer::begin(port, token);
         tcpStarted = true;
     }
@@ -1771,7 +1765,7 @@ void loop() {
 #if defined(OPENHOP_ETHERNET_W5100S)
         String token = wcfg.tcpToken;
 #else
-        String token = BOARD.has_wifi ? wcfg.tcpToken : String();
+        String token = (BOARD.has_wifi || !BOARD.has_lora_radio) ? wcfg.tcpToken : String();
 #endif
         OTAManager::begin(deviceHostname, token);
         otaStarted = true;
