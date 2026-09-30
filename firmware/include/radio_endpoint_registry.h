@@ -21,8 +21,10 @@ public:
                         session->endpoint().session != sessionId)) return false;
         for (size_t i = 0; i < count_; ++i) {
             const Entry& other = entries_[i];
-            if (other.radioId == radioId || other.sessionId == sessionId ||
-                other.port == port || other.owner == &owner ||
+            // The session slot is local to a radio. Distinct radios may
+            // each use slot 0; radio IDs and listening ports remain unique.
+            if (other.radioId == radioId || other.port == port ||
+                other.owner == &owner ||
                 (session && other.session == session) ||
                 &other.owner->config == &owner.config ||
                 &other.owner->runtime == &owner.runtime ||

@@ -61,13 +61,13 @@ int main() {
     StatusResp status[4] = {};
     RadioCommandContext owner[] = {
         {0, 0, cfg[0], runtime[0], status[0]},
-        {1, 1, cfg[1], runtime[1], status[1]},
-        {2, 2, cfg[2], runtime[2], status[2]},
-        {3, 3, cfg[3], runtime[3], status[3]}
+        {1, 0, cfg[1], runtime[1], status[1]},
+        {2, 0, cfg[2], runtime[2], status[2]},
+        {3, 0, cfg[3], runtime[3], status[3]}
     };
     TcpSession session[] = {
-        TcpSession(TcpEndpointIdentity{0, 0}), TcpSession(TcpEndpointIdentity{1, 1}),
-        TcpSession(TcpEndpointIdentity{2, 2}), TcpSession(TcpEndpointIdentity{3, 3})
+        TcpSession(TcpEndpointIdentity{0, 0}), TcpSession(TcpEndpointIdentity{1, 0}),
+        TcpSession(TcpEndpointIdentity{2, 0}), TcpSession(TcpEndpointIdentity{3, 0})
     };
     RadioEndpointRegistry<TcpSession, 4> registry;
     for (unsigned i = 0; i < 4; ++i) {
@@ -78,7 +78,7 @@ int main() {
         RadioConfig wire = cfg[i].config();
         wire.freq_hz += i * 1000000;
         assert(cfg[i].setFromWire(reinterpret_cast<uint8_t*>(&wire), sizeof(wire)));
-        assert(registry.add(i, i, static_cast<uint16_t>(5055 + i), owner[i], &session[i]));
+        assert(registry.add(i, 0, static_cast<uint16_t>(5055 + i), owner[i], &session[i]));
     }
     assert(registry.size() == 4);
     for (unsigned i = 0; i < 4; ++i) {
@@ -95,20 +95,24 @@ int main() {
     }
     RadioEndpointRegistry<TcpSession, 4> invalid;
     assert(invalid.add(0, 0, 5055, owner[0], &session[0]));
-    assert(!invalid.add(0, 1, 5056, owner[1], &session[1]));
-    assert(!invalid.add(1, 0, 5056, owner[1], &session[1]));
-    assert(!invalid.add(1, 1, 5055, owner[1], &session[1]));
-    assert(!invalid.add(1, 1, 5056, owner[0], &session[1]));
-    RadioCommandContext aliasCfg{1, 1, cfg[0], runtime[1], status[1]};
-    RadioCommandContext aliasRuntime{1, 1, cfg[1], runtime[0], status[1]};
-    RadioCommandContext aliasStatus{1, 1, cfg[1], runtime[1], status[0]};
-    assert(!invalid.add(1, 1, 5056, aliasCfg, &session[1]));
-    assert(!invalid.add(1, 1, 5056, aliasRuntime, &session[1]));
-    assert(!invalid.add(1, 1, 5056, aliasStatus, &session[1]));
-    assert(!invalid.add(1, 1, 0, owner[1], &session[1]));
-    assert(!invalid.add(1, 1, 5056, owner[1], &session[0]));
+    // Slot 0 is local to each radio, not globally reserved by the first.
+    assert(invalid.add(1, 0, 5056, owner[1], &session[1]));
+    RadioCommandContext duplicateRadio{0, 1, cfg[2], runtime[2], status[2]};
+    TcpSession duplicateSocket(TcpEndpointIdentity{0, 1});
+    assert(!invalid.add(0, 1, 5057, duplicateRadio, &duplicateSocket));
+    assert(!invalid.add(2, 0, 5055, owner[2], &session[2]));
+    assert(!invalid.add(1, 0, 5057, owner[1], &session[1]));
+    assert(!invalid.add(2, 0, 5057, owner[0], &session[2]));
+    RadioCommandContext aliasCfg{2, 0, cfg[0], runtime[2], status[2]};
+    RadioCommandContext aliasRuntime{2, 0, cfg[2], runtime[0], status[2]};
+    RadioCommandContext aliasStatus{2, 0, cfg[2], runtime[2], status[0]};
+    assert(!invalid.add(2, 0, 5057, aliasCfg, &session[2]));
+    assert(!invalid.add(2, 0, 5057, aliasRuntime, &session[2]));
+    assert(!invalid.add(2, 0, 5057, aliasStatus, &session[2]));
+    assert(!invalid.add(2, 0, 0, owner[2], &session[2]));
+    assert(!invalid.add(2, 0, 5057, owner[2], &session[0]));
     assert(registry.resolve({TransportSource::TCP, nullptr, 0}) == nullptr);
-    TcpSession forged(TcpEndpointIdentity{2, 2});
+    TcpSession forged(TcpEndpointIdentity{2, 0});
     authenticate(forged);
     assert(registry.resolve(forged.responseRoute()) == nullptr);
     assert(registry.resolve({TransportSource::TCP, &session[2], session[2].responseRoute().tcpGeneration + 1}) == nullptr);
