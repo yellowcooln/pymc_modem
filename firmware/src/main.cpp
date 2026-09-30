@@ -649,10 +649,15 @@ void sendError(uint8_t errCode, TransportSource dest) {
 void broadcastFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
                     uint8_t originRadio) {
     // Unsolicited radio events retain legacy USB/UART fan-out; Wi-Fi TCP
-    // only receives events from the radio bound to its ready session.
+    // filters by ready session and origin, while W5100S raw writes need the
+    // legacy readiness gate to keep pre-auth sockets from receiving RX.
     writeFrame(cmd, payload, len,
                /*toSerial=*/true,
+#ifdef ARDUINO_ARCH_ESP32
                /*toTCP=*/true,
+#else
+               /*toTCP=*/TCPServer::isClientReady(),
+#endif
                /*toUart=*/uartEnabled,
                nullptr, 0, &originRadio);
 }

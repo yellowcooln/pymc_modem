@@ -54,6 +54,18 @@ static bool uartEnabled = true;
             "-o", str(executable),
         ], check=True)
         subprocess.run([str(executable)], check=True)
+
+        # Recompile the same extracted production encoder without ESP32 so the
+        # W5100S TCPServer::write path is exercised with an ungated raw queue.
+        nrf_executable = pathlib.Path(directory) / "nrf_broadcast_auth_test"
+        subprocess.run([
+            compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-function", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            f"-I{firmware / 'tests' / 'tcp_stubs'}", f"-I{firmware / 'include'}",
+            str(firmware / "tests" / "nrf_broadcast_auth_test.cpp"),
+            str(output), "-o", str(nrf_executable),
+        ], check=True)
+        subprocess.run([str(nrf_executable)], check=True)
     return 0
 
 
