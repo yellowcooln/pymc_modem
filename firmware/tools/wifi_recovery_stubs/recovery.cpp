@@ -6,9 +6,24 @@ namespace ConfigPortal {bool active=false;int serviced=0;void begin(){active=tru
 #include "../../src/wifi_manager.cpp"
 #include "../../src/tcp_server.cpp"
 #include "../../src/frame_parser.cpp"
+#include "protocol.h"
+#include <vector>
 void processHostCommand(uint8_t,const uint8_t*,uint16_t,TransportSource){}
 void noteTransportFrameError(uint8_t){}
 #define CHECK(x) do{if(!(x)){std::cerr<<__LINE__<<": " #x "\n";return 1;}}while(0)
+// Feed actual wire frames through the public listener, not TcpSession internals.
+std::vector<uint8_t> frame(uint8_t cmd, const std::string& payload) {
+ std::vector<uint8_t> bytes{PROTO_SYNC,cmd,uint8_t(payload.size()),uint8_t(payload.size()>>8)};
+ bytes.insert(bytes.end(),payload.begin(),payload.end());
+ uint16_t crc=crc16_ccitt(bytes.data()+1,bytes.size()-1);
+ bytes.push_back(uint8_t(crc));bytes.push_back(uint8_t(crc>>8));return bytes;
+}
+void feed(const std::shared_ptr<SocketStub>& socket,const std::vector<uint8_t>& bytes,size_t first,size_t last) {
+ socket->input.insert(socket->input.end(),bytes.begin()+first,bytes.begin()+last);TCPServer::loop();
+}
+bool authOK(const std::shared_ptr<SocketStub>& socket) {
+ return socket->output==frame(CMD_AUTH_OK,"");
+}
 void tick(uint32_t n){clockMs+=n;WifiManager::loop();}
 void connected(){WiFi.statusValue=WL_CONNECTED;WiFi.event(ARDUINO_EVENT_WIFI_STA_GOT_IP);WifiManager::loop();}
 int main(int argc,char** argv){
@@ -32,7 +47,17 @@ int main(int argc,char** argv){
  else {
  connected();
  if(t=="renewal_preserved"){WiFi.event(ARDUINO_EVENT_WIFI_STA_GOT_IP);tick(1);CHECK(WifiManager::consumeSTAInvalidation()==0);}
- else if(t=="new_client_auth"){TCPServer::begin(5055,"secret");incomingClient.s=std::make_shared<SocketStub>();TCPServer::loop();TCPServer::authenticated=true;WiFi.event(ARDUINO_EVENT_WIFI_STA_DISCONNECTED);WiFi.event(ARDUINO_EVENT_WIFI_STA_GOT_IP);tick(1);TCPServer::invalidateInterface(IPAddress(WifiManager::consumeSTAInvalidation()));incomingClient.s=std::make_shared<SocketStub>();TCPServer::loop();CHECK(!TCPServer::isClientReady());CHECK(TCPServer::parser.state==FrameParser::WAIT_SYNC);}
+ else if(t=="new_client_auth"){
+ TCPServer::begin(5055,"secret");incomingClient.s=std::make_shared<SocketStub>();auto old=incomingClient.s;
+ TCPServer::loop();auto bytes=frame(CMD_AUTH,"secret");feed(old,bytes,0,bytes.size());
+ CHECK(TCPServer::isClientReady());CHECK(authOK(old));
+ WiFi.event(ARDUINO_EVENT_WIFI_STA_DISCONNECTED);WiFi.event(ARDUINO_EVENT_WIFI_STA_GOT_IP);tick(1);
+ auto address=WifiManager::consumeSTAInvalidation();CHECK(address!=0);
+ TCPServer::invalidateInterface(IPAddress(address));CHECK(!old->open);
+ incomingClient.s=std::make_shared<SocketStub>();auto fresh=incomingClient.s;
+ TCPServer::loop();CHECK(!TCPServer::isClientReady());CHECK(fresh->output.empty());
+ feed(fresh,bytes,0,bytes.size());CHECK(TCPServer::isClientReady());CHECK(authOK(fresh));
+ }
  else if(t=="lost_ip_stale_status"){WiFi.event(ARDUINO_EVENT_WIFI_STA_LOST_IP);tick(1);CHECK(!WifiManager::isSTAConnected());connected();CHECK(WifiManager::isSTAConnected());}
  else if(t=="ip_refresh"){WiFi.ip=IPAddress(192,168,1,99);tick(1);CHECK(std::string(WifiManager::getIPString())=="192.168.1.99");}
  else if(t=="short_outage"){
@@ -47,14 +72,27 @@ int main(int argc,char** argv){
  else if(t=="tcp_cleanup" || t=="ethernet_preserved" || t=="socket_address_loss"){
  TCPServer::begin(5055,"secret");incomingClient.s=std::make_shared<SocketStub>();auto socket=incomingClient.s;
  if(t=="ethernet_preserved")socket->local=IPAddress(10,0,0,20);
- TCPServer::loop();TCPServer::authenticated=true;
- TCPServer::parser.state=FrameParser::READ_PAYLOAD;
+ TCPServer::loop();auto auth=frame(CMD_AUTH,"secret");feed(socket,auth,0,auth.size());
+ CHECK(TCPServer::isClientReady());CHECK(authOK(socket));
+ // Leave a duplicate auth frame halfway through its payload.
+ feed(socket,auth,0,5);CHECK(TCPServer::isClientReady());
  if(t=="socket_address_loss")socket->local=IPAddress();
  #ifdef RECOVERY_IMPLEMENTED
  TCPServer::invalidateInterface(IPAddress(192,168,1,20));
  #endif
  CHECK(socket->open==(t=="ethernet_preserved"));
- CHECK((TCPServer::parser.state==FrameParser::READ_PAYLOAD)==(t=="ethernet_preserved"));CHECK(TCPServer::authenticated==(t=="ethernet_preserved"));
+ if(t=="ethernet_preserved"){
+  // The unaffected socket retains authorization and its partial parser state.
+  feed(socket,auth,5,auth.size());CHECK(TCPServer::isClientReady());
+  auto both=frame(CMD_AUTH_OK,"");auto ack=both;both.insert(both.end(),ack.begin(),ack.end());
+  CHECK(socket->output==both);
+ } else {
+  incomingClient.s=std::make_shared<SocketStub>();auto fresh=incomingClient.s;
+  TCPServer::loop();CHECK(!TCPServer::isClientReady());
+  feed(fresh,auth,5,auth.size());CHECK(!TCPServer::isClientReady());
+  CHECK(fresh->output.empty());CHECK(fresh->open);
+  feed(fresh,auth,0,auth.size());CHECK(TCPServer::isClientReady());CHECK(authOK(fresh));
+ }
  }
  else {int b=WiFi.begins;WiFi.statusValue=WL_DISCONNECTED;
  WiFi.event(t=="lost_ip"?ARDUINO_EVENT_WIFI_STA_LOST_IP:ARDUINO_EVENT_WIFI_STA_DISCONNECTED,t=="auth_failure"?202:200);

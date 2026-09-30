@@ -1,6 +1,7 @@
 #pragma once
 #include "IPAddress.h"
 #include <functional>
+#include <vector>
 enum arduino_event_id_t {ARDUINO_EVENT_WIFI_STA_START, ARDUINO_EVENT_WIFI_STA_STOP, ARDUINO_EVENT_WIFI_STA_CONNECTED, ARDUINO_EVENT_WIFI_STA_DISCONNECTED, ARDUINO_EVENT_WIFI_STA_GOT_IP, ARDUINO_EVENT_WIFI_STA_LOST_IP, ARDUINO_EVENT_WIFI_AP_START, ARDUINO_EVENT_WIFI_AP_STOP};
 struct arduino_event_info_t { struct {int channel=1;} wifi_sta_connected; struct {int reason=0;} wifi_sta_disconnected; struct {bool ip_changed=false;} got_ip; };
 enum {WL_IDLE_STATUS=0,WL_NO_SSID_AVAIL=1,WL_CONNECTED=3,WL_CONNECT_FAILED=4,WL_DISCONNECTED=6, WIFI_OFF=0,WIFI_STA=1,WIFI_AP=2,WIFI_AP_STA=3};
@@ -37,7 +38,7 @@ struct WifiStub {
  bool softAPdisconnect(bool){apStops++;if(failAPStop)return false;ap=false;return true;}
 };
 inline WifiStub WiFi;
-struct SocketStub {bool open=true;IPAddress local{192,168,1,20};std::deque<uint8_t> input;};
+struct SocketStub {bool open=true;IPAddress local{192,168,1,20};std::deque<uint8_t> input;std::vector<uint8_t> output;};
 struct WiFiClient {
  std::shared_ptr<SocketStub> s;
  explicit operator bool()const{return s && s->open;}
@@ -46,7 +47,7 @@ struct WiFiClient {
  IPAddress remoteIP(){return IPAddress(192,168,1,2);}
  IPAddress localIP(){return s?s->local:IPAddress();}
  void setNoDelay(bool){}
- size_t write(const uint8_t*,size_t n){return n;}
+ size_t write(const uint8_t* p,size_t n){s->output.insert(s->output.end(),p,p+n);return n;}
  int available(){return s?s->input.size():0;}
  int read(){int b=s->input.front();s->input.pop_front();return b;}
 };
