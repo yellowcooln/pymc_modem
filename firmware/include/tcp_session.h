@@ -25,6 +25,7 @@ public:
     const TcpEndpointIdentity& endpoint() const { return endpoint_; }
     ResponseRoute responseRoute() { return {TransportSource::TCP, this, generation_}; }
     void writeForRoute(const uint8_t* data, size_t len, uint32_t generation);
+    void writeForRadioEvent(const uint8_t* data, size_t len, uint8_t originRadio);
     void write(const uint8_t* data, size_t len);
 
 private:
@@ -48,3 +49,8 @@ private:
     uint32_t frameCount_ = 0;
     uint32_t parsedFrameCount_ = 0;
 };
+
+// Bounded cooperative fan-out; caller owns the sessions. The active listener
+// still supplies only one entry and retains its single-client admission.
+void writeRadioEventToSessions(TcpSession* const* sessions, size_t count,
+                               const uint8_t* data, size_t len, uint8_t originRadio);

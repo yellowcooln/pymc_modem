@@ -2,8 +2,9 @@
 
 #include <stdint.h>
 
-// Stable binding of a TCP listener's radio endpoint and session slot. This is
-// command-ingress metadata only; it is not a wire-format field or reply route.
+// Stable binding of a TCP listener's radio endpoint and session slot. The
+// radio gates unsolicited event delivery; neither field enters the wire format
+// or replaces a command's generation-bound ResponseRoute.
 struct TcpEndpointIdentity {
     const uint8_t radio;
     const uint8_t session;

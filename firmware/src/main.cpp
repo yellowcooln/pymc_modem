@@ -582,7 +582,8 @@ static void configureStaticGpios() {
 static void writeFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
                        bool toSerial, bool toTCP, bool toUart,
                        TcpSession* replySession = nullptr,
-                       uint32_t replyGeneration = 0) {
+                       uint32_t replyGeneration = 0,
+                       const uint8_t* radioEventOrigin = nullptr) {
     uint8_t buf[MAX_FRAME_SIZE];
     uint16_t i = 0;
     buf[i++] = PROTO_SYNC;
@@ -607,11 +608,13 @@ static void writeFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
     if (toTCP) {
 #ifdef ARDUINO_ARCH_ESP32
-        if (replySession) replySession->writeForRoute(buf, i, replyGeneration);
+        if (radioEventOrigin) TCPServer::writeRadioEvent(buf, i, *radioEventOrigin);
+        else if (replySession) replySession->writeForRoute(buf, i, replyGeneration);
         else TCPServer::write(buf, i); // legacy broadcasts
 #else
         (void)replySession;
         (void)replyGeneration;
+        (void)radioEventOrigin;
         TCPServer::write(buf, i); // W5100S legacy socket
 #endif
     }
@@ -643,14 +646,15 @@ void sendError(uint8_t errCode, TransportSource dest) {
     sendFrame(CMD_ERROR, &errCode, 1, dest);
 }
 
-void broadcastFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
-    // Async events (RX_PACKET, TX_DONE, TX_FAIL): fan out to every
-    // active host transport so whichever one the controller is
-    // listening on receives the event.
+void broadcastFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
+                    uint8_t originRadio) {
+    // Unsolicited radio events retain legacy USB/UART fan-out; Wi-Fi TCP
+    // only receives events from the radio bound to its ready session.
     writeFrame(cmd, payload, len,
                /*toSerial=*/true,
-               /*toTCP=*/TCPServer::isClientReady(),
-               /*toUart=*/uartEnabled);
+               /*toTCP=*/true,
+               /*toUart=*/uartEnabled,
+               nullptr, 0, &originRadio);
 }
 
 // ─── Remote log → host (CMD_LOG_MSG) ─────────────────────────
@@ -905,7 +909,8 @@ void handleLoRaRx() {
     rxPayload[5] = (signal_rssi >> 8) & 0xFF;
     memcpy(rxPayload + 6, rxBuf, len);
 
-    broadcastFrame(CMD_RX_PACKET, rxPayload, 6 + len);
+    constexpr uint8_t primaryRadioEndpoint = 0;
+    broadcastFrame(CMD_RX_PACKET, rxPayload, 6 + len, primaryRadioEndpoint);
     primaryRadioRuntime.noise.recordPacket(millis());
     startReceive();
 }

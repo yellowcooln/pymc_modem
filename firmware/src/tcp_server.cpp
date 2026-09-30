@@ -61,5 +61,9 @@ void loop() {
 bool isClientReady() { return session.isReady(); }
 String getClientIP() { return session.clientIP(); }
 void write(const uint8_t* data, size_t len) { session.write(data, len); }
+void writeRadioEvent(const uint8_t* data, size_t len, uint8_t originRadio) {
+    TcpSession* sessions[] = {&session};
+    writeRadioEventToSessions(sessions, 1, data, len, originRadio);
+}
 
 } // namespace TCPServer

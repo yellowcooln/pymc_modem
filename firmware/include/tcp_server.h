@@ -35,4 +35,7 @@ String getClientIP();
 // Queue bytes to connected client; no-op if no client.
 void write(const uint8_t* data, size_t len);
 
+// Unsolicited radio events only: deliver to a ready session bound to origin.
+void writeRadioEvent(const uint8_t* data, size_t len, uint8_t originRadio);
+
 } // namespace TCPServer

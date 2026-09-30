@@ -57,6 +57,17 @@ void TcpSession::writeForRoute(const uint8_t* data, size_t len, uint32_t generat
     if (generation == generation_ && isReady()) write(data, len);
 }
 
+void TcpSession::writeForRadioEvent(const uint8_t* data, size_t len, uint8_t originRadio) {
+    if (endpoint_.radio == originRadio && isReady()) write(data, len);
+}
+
+void writeRadioEventToSessions(TcpSession* const* sessions, size_t count,
+                               const uint8_t* data, size_t len, uint8_t originRadio) {
+    for (size_t i = 0; i < count; ++i) {
+        if (sessions[i]) sessions[i]->writeForRadioEvent(data, len, originRadio);
+    }
+}
+
 void TcpSession::sendFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
     if (!connected()) return;
     uint8_t buf[MAX_FRAME_SIZE];

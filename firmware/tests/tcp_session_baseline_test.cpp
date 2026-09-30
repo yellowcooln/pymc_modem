@@ -28,6 +28,7 @@ std::vector<uint8_t>& fakeUartOutput();
 extern void sendFrame(uint8_t, const uint8_t*, uint16_t, ResponseRoute);
 extern void sendFrame(uint8_t, const uint8_t*, uint16_t, TransportSource);
 extern void sendError(uint8_t, ResponseRoute);
+extern void broadcastFrame(uint8_t, const uint8_t*, uint16_t, uint8_t);
 
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                         ResponseRoute route) {
@@ -108,6 +109,14 @@ static void testAuthGateAndResponses() {
     const auto response = frame(CMD_PONG);
     TCPServer::write(response.data(), response.size());
     expectOutput(allowed, CMD_PONG);
+    // Production encoder -> real listener -> bound session, not the legacy
+    // TCPServer::write alias used above for backwards compatibility.
+    broadcastFrame(CMD_RX_PACKET, nullptr, 0, 1);
+    assert(allowed->output.empty());
+    broadcastFrame(CMD_RX_PACKET, nullptr, 0, 0);
+    expectOutput(allowed, CMD_RX_PACKET);
+    Serial.output.clear();
+    fakeUartOutput().clear();
 }
 
 static void testParsingAndFairness() {
@@ -312,6 +321,56 @@ static void testIndependentSessions() {
     second.disconnect();
 }
 
+static void testOriginBoundAsyncEvents() {
+    TCPServer::end();
+    Serial.output.clear();
+    fakeUartOutput().clear();
+    TcpSession rf1(TcpEndpointIdentity{0, 0}), rf2(TcpEndpointIdentity{1, 1});
+    rf1.configure(String("secret"));
+    rf2.configure(String("other"));
+    auto a = std::make_shared<fake_tcp::Socket>();
+    auto b = std::make_shared<fake_tcp::Socket>();
+    rf1.accept(WiFiClient(a));
+    rf2.accept(WiFiClient(b));
+    TcpSession* sessions[] = {&rf1, &rf2};
+    const uint8_t rx[] = {0x9c, 0xff, 0x18, 0, 0x9c, 0xff, 0x42};
+    const auto packet = frame(CMD_RX_PACKET, {rx, rx + sizeof(rx)});
+
+    // The production broadcast encoder's TCP event path is exercised through
+    // the production fan-out gate; neither socket is authenticated yet.
+    broadcastFrame(CMD_RX_PACKET, rx, sizeof(rx), 0);
+    assert(Serial.output == packet && fakeUartOutput() == packet);
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 0);
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 1);
+    assert(a->output.empty() && b->output.empty());
+    Serial.output.clear(); fakeUartOutput().clear();
+
+    enqueue(a, frame(CMD_AUTH, {'s','e','c','r','e','t'}));
+    enqueue(b, frame(CMD_AUTH, {'o','t','h','e','r'}));
+    rf1.service(); rf2.service();
+    expectOutput(a, CMD_AUTH_OK); expectOutput(b, CMD_AUTH_OK);
+    broadcastFrame(CMD_RX_PACKET, rx, sizeof(rx), 0);
+    assert(Serial.output == packet && fakeUartOutput() == packet);
+    // Inject the serialized production frame into the exact same fan-out
+    // function used by the real single listener (which owns one session).
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 0);
+    expectOutput(a, CMD_RX_PACKET, {rx, rx + sizeof(rx)});
+    assert(b->output.empty());
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 1);
+    expectOutput(b, CMD_RX_PACKET, {rx, rx + sizeof(rx)});
+    assert(a->output.empty());
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 2);
+    assert(a->output.empty() && b->output.empty());
+    rf1.disconnect();
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 0);
+    assert(a->output.empty());
+    rf1.accept(WiFiClient(std::make_shared<fake_tcp::Socket>()));
+    assert(!rf1.isReady());
+    writeRadioEventToSessions(sessions, 2, packet.data(), packet.size(), 0);
+    assert(a->output.empty());
+    rf2.disconnect();
+}
+
 int main() {
     testAuthGateAndResponses();
     testParsingAndFairness();
@@ -320,6 +379,7 @@ int main() {
     testPartialAuthCannotCrossReconnect();
     testNonLanRejectedBeforeParsing();
     testIndependentSessions();
+    testOriginBoundAsyncEvents();
     TCPServer::end();
-    std::puts("TCP production session baseline: PASS (7 scenarios)");
+    std::puts("TCP production session baseline: PASS (8 scenarios)");
 }
