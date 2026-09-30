@@ -31,6 +31,10 @@
 #include "response_route.h"
 #include "compat.h"
 #include "rf_frontend.h"
+#if defined(BOARD_ETHERMESH_1W)
+// Compile the dormant RAK13302 policy without constructing or enabling it.
+#include "rak13302_frontend_policy.h"
+#endif
 #include "agc_maintenance.h"
 #include "station_g3_power.h"
 #include "runtime_stats.h"
