@@ -12,7 +12,9 @@ def main():
     if not compiler:
         raise SystemExit("g++ is required")
     source = (firmware / "src" / "main.cpp").read_text()
-    assert source.index("RadioIrqOwner<0>::bind(primaryRadioRuntime);") < source.index("radio.setDio1Action(onDio1Rise);")
+    binding = source.split("if (!RadioIrqOwner<0>::bind(primaryRadioRuntime)) {", 1)[1].split("radio.setDio1Action(onDio1Rise);", 1)[0]
+    assert 'while (true) delay(1000);' in binding
+    assert source.index("if (!RadioIrqOwner<0>::bind(primaryRadioRuntime)) {") < source.index("radio.setDio1Action(onDio1Rise);")
     callback = source.split("void onDio1Rise() {", 1)[1].split("\n}\n", 1)[0]
     rx_dispatch = source.split("    // DIO1 during TX is consumed", 1)[1].split("\n\n    while (Serial.available())", 1)[0]
     with tempfile.TemporaryDirectory(prefix="openhop-radio-runtime-") as directory:

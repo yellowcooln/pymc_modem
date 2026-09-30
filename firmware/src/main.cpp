@@ -1468,7 +1468,12 @@ void setup() {
         }
 
         // Owner is static and bound before RadioLib can attach the IRQ.
-        RadioIrqOwner<0>::bind(primaryRadioRuntime);
+        // Never attach an interrupt that would signal a different radio.
+        if (!RadioIrqOwner<0>::bind(primaryRadioRuntime)) {
+            LOG_R_ERR("DIO1 IRQ owner conflict; refusing radio startup");
+            oled.showError("IRQ owner conflict!");
+            while (true) delay(1000);
+        }
         radio.setDio1Action(onDio1Rise);
         LOG_R_INFO("DIO1 IRQ attached on GPIO%d", (int)BOARD.pin_lora_dio1);
 
