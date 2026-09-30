@@ -17,6 +17,7 @@
 #include "radio_config_state.h"
 #include "radio_runtime_state.h"
 #include "board_config.h"
+#include "radio_hardware.h"
 #include "rak3401_ready_led.h"
 #include "bootloader_manager.h"
 #include "frame_parser.h"
@@ -286,49 +287,10 @@ static String fwVersion;   // populated in setup()
 static constexpr uint32_t LOOP_WDT_TIMEOUT_S = 30;
 
 // ─── Hardware setup ──────────────────────────────────────────
-class OpenHopSX1262 : public SX1262 {
-public:
-    using SX1262::SX1262;
-
-    int16_t startReceive() override {
-        // RadioLib's default RX IRQ set omits PREAMBLE_DETECTED. The passive
-        // reception guard needs that flag latched before HEADER_VALID so a
-        // TX/CAD request cannot abort a frame during its preamble.
-        return SX1262::startReceive(
-            RADIOLIB_SX126X_RX_TIMEOUT_INF,
-            RADIOLIB_IRQ_RX_DEFAULT_FLAGS |
-                (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
-            RADIOLIB_IRQ_RX_DEFAULT_MASK,
-            0);
-    }
-
-    int16_t applyRegisterPatch08B5() {
-        uint8_t value = 0;
-        int16_t state = readRegister(0x08B5, &value, 1);
-        if (state != RADIOLIB_ERR_NONE) return state;
-        value |= 0x01;
-        return writeRegister(0x08B5, &value, 1);
-    }
-};
-
-// SX1262 / E22P pin map comes from BOARD (see boards/<name>.h).
-#if defined(BOARD_PHOTON_1W_XIAO_ESP32C6)
-static SPIClass loraSpi(0);
-OpenHopSX1262 radio = new Module(BOARD.pin_lora_nss, BOARD.pin_lora_dio1,
-                              BOARD.pin_lora_rst, BOARD.pin_lora_busy,
-                              loraSpi);
-#elif defined(BOARD_RAK4631_WISMESH_ETH) || defined(BOARD_RAK4631_USB)
-// The RAK4631 internal SX1262 uses its own nRF52 SPIM instance on
-// P1.11/P1.13/P1.12. On the Ethernet variant this also keeps global SPI free
-// for RAK13800/W5100S; the USB-only variant retains the proven radio path.
-static SPIClass loraSpi(NRF_SPIM2, 45, 43, 44);  // MISO, SCK, MOSI
-OpenHopSX1262 radio = new Module(BOARD.pin_lora_nss, BOARD.pin_lora_dio1,
-                              BOARD.pin_lora_rst, BOARD.pin_lora_busy,
-                              loraSpi);
-#else
-OpenHopSX1262 radio = new Module(BOARD.pin_lora_nss, BOARD.pin_lora_dio1,
-                              BOARD.pin_lora_rst, BOARD.pin_lora_busy);
-#endif
+// Transitional alias: all current call sites still use the original radio.
+// A later step can route each transport/runtime to its own hardware instance.
+static RadioHardware primaryRadioHardware(BOARD);
+OpenHopSX1262& radio = primaryRadioHardware.radio;
 
 // Single instance regardless of build — on ESP32 this is the real
 // SSD1306 driver from oled_display.cpp; on nRF52 it's a no-op stub
@@ -1647,29 +1609,7 @@ void setup() {
         // board has remapped SPI (LilyGO T3-S3 etc.) and we must call
         // SPI.begin() with the explicit pins or RadioLib's first SPI
         // transfer fails.
-        if (BOARD.pin_lora_sck >= 0 || BOARD.pin_lora_miso >= 0 || BOARD.pin_lora_mosi >= 0) {
-#ifdef ARDUINO_ARCH_ESP32
-#if defined(BOARD_PHOTON_1W_XIAO_ESP32C6)
-            // Seeed XIAO ESP32-C6 Photon variant matches MeshCore's
-            // working C6 port, which uses SPIClass(0) for the LoRa bus.
-            loraSpi.begin(BOARD.pin_lora_sck, BOARD.pin_lora_miso,
-                          BOARD.pin_lora_mosi);
-#else
-            // ESP32-S3/P4 GPIO matrix: rebind SPI to specific pins
-            SPI.begin(BOARD.pin_lora_sck, BOARD.pin_lora_miso,
-                      BOARD.pin_lora_mosi, BOARD.pin_lora_nss);
-#endif
-#else
-            // nRF52 BSP: SPI peripheral has fixed pins on its selected
-            // instance. RAK4631 WisMesh uses a dedicated LoRa SPI instance;
-            // global SPI remains the W5100S Ethernet bus.
-#  if defined(BOARD_RAK4631_WISMESH_ETH) || defined(BOARD_RAK4631_USB)
-            loraSpi.begin();
-#  else
-            SPI.begin();
-#  endif
-#endif
-        }
+        primaryRadioHardware.beginSpi();
 
         LOG_R_INFO("radio.begin nss=%d dio1=%d rst=%d busy=%d spi=(%d,%d,%d)",
                    (int)BOARD.pin_lora_nss, (int)BOARD.pin_lora_dio1,
