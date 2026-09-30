@@ -6,6 +6,25 @@
 // onDio1Rise() is deliberately limited to the same volatile stores as the
 // legacy ISR; count is diagnostic, not an atomic synchronization primitive.
 struct RadioRuntimeState {
+    // Per-radio CAD policy. The caller retains RadioLib scan/IRQ timing and
+    // persists autoEnabled where the board already supports persistence.
+    struct CadPolicy {
+        bool autoEnabled = false;
+        bool custom = false;
+        uint8_t symNum = 0x01;
+        uint8_t detPeak = 22;
+        uint8_t detMin = 10;
+        uint8_t exitMode = 0x00;
+
+        void setParams(const uint8_t* params) {
+            symNum = params[0];
+            detPeak = params[1];
+            detMin = params[2];
+            exitMode = params[3];
+            custom = true;
+        }
+    } cad;
+
     volatile bool dio1Pending = false;
     volatile uint32_t dio1Count = 0;
     bool ready = false;

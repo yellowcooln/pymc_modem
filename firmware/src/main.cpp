@@ -340,10 +340,8 @@ OledDisplay oled;
 static RadioConfigState primaryRadioConfig;
 
 static StatusResp  status        = {};
-// One software runtime per radio. RadioLib/SPI and the remaining configuration,
-// CAD and telemetry state are deliberately still singleton in this slice.
+// One software runtime per radio. RadioLib/SPI and telemetry remain singleton.
 static RadioRuntimeState primaryRadioRuntime;
-static bool autoCadEnabled = false;   // pre-TX CAD; enabled via CMD_SET_AUTO_CAD, persisted in NodeState
 
 // DIO1 is interpreted as RX_DONE outside TX, and as TX_DONE during TX.
 // Each instance owns its own flag and count; callbacks must only touch theirs.
@@ -364,15 +362,6 @@ static uint32_t agcResetCount = 0;
 static uint32_t lastSuccessfulAgcResetMs = 0;
 static uint32_t lastAgcSuccessLogMs = 0;
 #endif
-
-// ─── CAD parameters (set by host via CMD_SET_CAD_PARAMS) ─────
-// When cadCustom == false we call scanChannel() with RadioLib's defaults;
-// host can override by programming peak/min/symbols/exit_mode.
-static bool    cadCustom   = false;
-static uint8_t cadSymNum   = 0x01;  // RADIOLIB_SX126X_CAD_ON_2_SYMB — matches openHop Core
-static uint8_t cadDetPeak  = 22;    // openHop Core default for SF7-SF8
-static uint8_t cadDetMin   = 10;    // AN1200.48 recommendation
-static uint8_t cadExitMode = 0x00;  // RADIOLIB_SX126X_CAD_GOTO_STDBY
 
 // ─── Reception-in-progress guard ─────────────────────────────
 // PREAMBLE_DETECTED / HEADER_VALID latch in the chip's IRQ status while a
@@ -499,7 +488,7 @@ Snapshot capture() {
     snap.radio = primaryRadioConfig.config();
     snap.firmwareVersion = fwVersion;
     snap.radioStandby = primaryRadioRuntime.standby;
-    snap.autoCadEnabled = autoCadEnabled;
+    snap.autoCadEnabled = primaryRadioRuntime.cad.autoEnabled;
     snap.hasBatteryChargeRatePctPerHour = BOARD.battery.fuel_gauge_i2c_addr != 0 &&
         BOARD.battery.fuel_gauge_crate_reg != 0;
     if (snap.hasBatteryChargeRatePctPerHour) {
@@ -1035,7 +1024,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // All channel checks run BEFORE the standby that stages the
         // TX: standby() aborts an in-progress reception, so the old
         // order destroyed the very reception it was about to probe.
-        if (autoCadEnabled) {
+        if (primaryRadioRuntime.cad.autoEnabled) {
             // 2 retries (3 scans total) + tightened jitter caps
             // worst-case main-loop blocking around ~750 ms.
             // Important because the loop also drains the UART RX
@@ -1054,10 +1043,10 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                     break;
                 }
                 ChannelScanConfig_t cfg = {};
-                cfg.cad.symNum    = cadSymNum;
-                cfg.cad.detPeak   = cadDetPeak;
-                cfg.cad.detMin    = cadDetMin;
-                cfg.cad.exitMode  = cadExitMode;
+                cfg.cad.symNum    = primaryRadioRuntime.cad.symNum;
+                cfg.cad.detPeak   = primaryRadioRuntime.cad.detPeak;
+                cfg.cad.detMin    = primaryRadioRuntime.cad.detMin;
+                cfg.cad.exitMode  = primaryRadioRuntime.cad.exitMode;
                 cfg.cad.irqFlags  = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
                 cfg.cad.irqMask   = RADIOLIB_IRQ_CAD_DEFAULT_MASK;
                 primaryRadioRuntime.clearIrq();
@@ -1200,16 +1189,16 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 
         primaryRadioRuntime.clearIrq();
         int state;
-        if (cadCustom) {
+        if (primaryRadioRuntime.cad.custom) {
             // v0.5.9: IRQ flags & mask MUST be set — zero-initialised cfg
             // made RadioLib call setDioIrqParams(0, 0), so CAD_DONE/DETECTED
             // never routed to DIO1 and our DIO1 polling always timed
             // out. That turned every CAD into ERR_CAD_FAILED.
             ChannelScanConfig_t cfg = {};
-            cfg.cad.symNum   = cadSymNum;
-            cfg.cad.detPeak  = cadDetPeak;
-            cfg.cad.detMin   = cadDetMin;
-            cfg.cad.exitMode = cadExitMode;
+            cfg.cad.symNum   = primaryRadioRuntime.cad.symNum;
+            cfg.cad.detPeak  = primaryRadioRuntime.cad.detPeak;
+            cfg.cad.detMin   = primaryRadioRuntime.cad.detMin;
+            cfg.cad.exitMode = primaryRadioRuntime.cad.exitMode;
             cfg.cad.timeout  = 0;
             cfg.cad.irqFlags = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS;
             cfg.cad.irqMask  = RADIOLIB_IRQ_CAD_DEFAULT_MASK;
@@ -1269,11 +1258,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             sendError(ERR_INVALID_CONFIG, src);
             break;
         }
-        cadSymNum   = payload[0];
-        cadDetPeak  = payload[1];
-        cadDetMin   = payload[2];
-        cadExitMode = payload[3];
-        cadCustom   = true;
+        primaryRadioRuntime.cad.setParams(payload);
 
         // Ack before letting the chip settle. A blocking primer scan here
         // was attempted in an earlier v0.5.5 draft and itself hung — the
@@ -1403,7 +1388,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         // it survives modem reboot independent of the controller.
         if (len < 1) { sendError(ERR_INVALID_CMD, src); break; }
         bool on = payload[0] != 0;
-        autoCadEnabled = on;
+        primaryRadioRuntime.cad.autoEnabled = on;
 #if defined(BOARD_HELTEC_T114)
         NodeState::setAutoCad(on);
 #endif
@@ -1561,7 +1546,7 @@ void setup() {
     // up by the OLED at the first show*() call.
     NodeState::begin();
     primaryRadioRuntime.standby   = NodeState::getStandby();
-    autoCadEnabled = NodeState::getAutoCad();
+    primaryRadioRuntime.cad.autoEnabled = NodeState::getAutoCad();
 #endif
 
     Serial.begin(921600);

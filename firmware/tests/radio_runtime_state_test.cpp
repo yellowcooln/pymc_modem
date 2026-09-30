@@ -42,7 +42,26 @@ static void legacyStandbyAndTxTransitions() {
     assert(radio.irqCount() == 2);
 }
 
+static void independentCadPolicies() {
+    RadioRuntimeState first, second;
+    assert(!first.cad.custom && !second.cad.custom);
+    assert(!first.cad.autoEnabled && !second.cad.autoEnabled);
+    assert(first.cad.symNum == 0x01 && first.cad.detPeak == 22);
+    assert(first.cad.detMin == 10 && first.cad.exitMode == 0);
+    const uint8_t settings[] = {0x04, 31, 12, 1};
+    first.cad.setParams(settings);
+    first.cad.autoEnabled = true;
+    assert(first.cad.custom && first.cad.autoEnabled);
+    assert(first.cad.symNum == 0x04 && first.cad.detPeak == 31);
+    assert(first.cad.detMin == 12 && first.cad.exitMode == 1);
+    assert(!second.cad.custom && !second.cad.autoEnabled);
+    assert(second.cad.symNum == 0x01 && second.cad.detPeak == 22);
+    second.cad.setParams(settings);
+    assert(second.cad.custom && !second.cad.autoEnabled);
+}
+
 int main() {
     independentIrqsAndRxOwnership();
     legacyStandbyAndTxTransitions();
+    independentCadPolicies();
 }
