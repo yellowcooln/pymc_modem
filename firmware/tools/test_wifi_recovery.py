@@ -15,7 +15,7 @@ class RecoveryTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix='openhop-74-tests-')
         cls.binary = Path(cls.tmp.name) / 'recovery'
-        subprocess.run(['g++', '-std=c++17', '-DRECOVERY_IMPLEMENTED', '-Wall', '-Wextra', '-Werror',
+        subprocess.run(['g++', '-std=c++17', '-DRECOVERY_IMPLEMENTED', '-DARDUINO_ARCH_ESP32', '-Wall', '-Wextra', '-Werror',
                         '-I' + str(STUBS), '-I' + str(ROOT / 'include'),
                         str(STUBS / 'recovery.cpp'), str(ROOT / 'src/tcp_listener.cpp'),
                         str(ROOT / 'src/tcp_session.cpp'),
