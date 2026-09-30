@@ -16,6 +16,7 @@
 #include "protocol.h"
 #include "radio_config_state.h"
 #include "radio_runtime_state.h"
+#include "radio_command_context.h"
 #include "board_config.h"
 #include "radio_hardware.h"
 #include "radio_initialization.h"
@@ -920,12 +921,78 @@ void handleLoRaRx() {
     startReceive();
 }
 
+// ─── Endpoint-owned radio queries ───────────────────────────
+// This deliberately contains only commands that need no RadioLib operation.
+// An unbound secondary endpoint must not accidentally touch the primary chip.
+static bool dispatchRadioQuery(uint8_t cmd, const uint8_t*, uint16_t,
+                               ResponseRoute route, RadioCommandContext& owner) {
+    switch (cmd) {
+    case CMD_GET_CONFIG:
+    case CMD_STATUS_REQ:
+    case CMD_NOISE_REQ:
+        if (!BOARD.has_lora_radio || !owner.runtime.ready) {
+            sendError(ERR_NO_RADIO, route);
+            return true;
+        }
+        break;
+    default:
+        return false;
+    }
+    if (cmd == CMD_GET_CONFIG) {
+        sendFrame(CMD_CONFIG_RESP, owner.config.wireData(), sizeof(RadioConfig), route);
+    } else if (cmd == CMD_STATUS_REQ) {
+        // The legacy runtime snapshot reads the active primary hardware only.
+        // A secondary owner keeps its independent status until its own RX/TX
+        // worker can update it; never report primary counters as secondary.
+        if (owner.radioId == 0) owner.status = RuntimeStats::capture().status;
+        sendFrame(CMD_STATUS_RESP, reinterpret_cast<const uint8_t*>(&owner.status),
+                  sizeof(StatusResp), route);
+    } else {
+        const int16_t nf = owner.runtime.noise.floorX10();
+        uint8_t resp[2] = {static_cast<uint8_t>(nf), static_cast<uint8_t>(nf >> 8)};
+        sendFrame(CMD_NOISE_RESP, resp, 2, route);
+    }
+    return true;
+}
+
+// ─── Endpoint-owned command admission ───────────────────────
+static bool rejectUnownedCommand(uint8_t cmd, ResponseRoute route,
+                                 RadioCommandContext& owner) {
+#ifdef ARDUINO_ARCH_ESP32
+    if (route.tcp) {
+        const TcpEndpointIdentity& endpoint = route.tcp->endpoint();
+        if (route.source != TransportSource::TCP || endpoint.radio != owner.radioId) {
+            sendError(ERR_INVALID_CMD, route);
+            return true;
+        }
+    } else if (owner.radioId != 0) {
+        sendError(ERR_INVALID_CMD, route);
+        return true;
+    }
+#else
+    if (route.tcp || owner.radioId != 0) {
+        sendError(ERR_INVALID_CMD, route);
+        return true;
+    }
+#endif
+    // All non-query radio handlers still use the primary chip, RF front end,
+    // and singleton state. Refuse them on secondary rather than aliasing it.
+    if (owner.radioId != 0 && cmd != CMD_GET_CONFIG &&
+        cmd != CMD_STATUS_REQ && cmd != CMD_NOISE_REQ) {
+        sendError(ERR_INVALID_CMD, route);
+        return true;
+    }
+    return false;
+}
+
 // ─── Host command dispatch ──────────────────────────────────
 void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
-                        ResponseRoute route) {
+                        ResponseRoute route, RadioCommandContext& owner) {
     const TransportSource src = route.source;
+    if (rejectUnownedCommand(cmd, route, owner)) return;
     // Any successfully-processed host frame counts toward OTA sanity.
     OTAManager::notifyValidFrame();
+    if (dispatchRadioQuery(cmd, payload, len, route, owner)) return;
 
     // Boards without a LoRa radio, or boards where SX1262 init failed,
     // ack the non-radio commands (PING, GET_VERSION, GET_WIFI, AUTH, …)
@@ -933,8 +1000,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     // probe the modem and configure Wi-Fi via the existing flow.
     if (!BOARD.has_lora_radio || !primaryRadioRuntime.ready) {
         switch (cmd) {
-        case CMD_TX_REQUEST:  case CMD_SET_CONFIG:  case CMD_GET_CONFIG:
-        case CMD_STATUS_REQ:  case CMD_NOISE_REQ:   case CMD_CAD_REQUEST:
+        case CMD_TX_REQUEST:  case CMD_SET_CONFIG:  case CMD_CAD_REQUEST:
         case CMD_RX_START:    case CMD_SET_CAD_PARAMS:
             sendError(ERR_NO_RADIO, route);
             return;
@@ -1249,27 +1315,6 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         break;
     }
 
-    case CMD_GET_CONFIG: {
-        sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), route);
-        break;
-    }
-
-    case CMD_STATUS_REQ: {
-        const RuntimeStats::Snapshot live = RuntimeStats::capture();
-        status = live.status;
-        sendFrame(CMD_STATUS_RESP, (uint8_t*)&status, sizeof(StatusResp), route);
-        break;
-    }
-
-    case CMD_NOISE_REQ: {
-        int16_t nf = primaryRadioRuntime.noise.floorX10();
-        uint8_t resp[2];
-        resp[0] = nf & 0xFF;
-        resp[1] = (nf >> 8) & 0xFF;
-        sendFrame(CMD_NOISE_RESP, resp, 2, route);
-        break;
-    }
-
     case CMD_GET_WIFI: {
         uint8_t buf[200];
         uint16_t n = buildWifiStatusPayload(buf);
@@ -1449,6 +1494,26 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
         sendError(ERR_INVALID_CMD, route);
         break;
     }
+}
+
+void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
+                        ResponseRoute route) {
+    RadioCommandContext primary{0, primaryRadioConfig, primaryRadioRuntime, status};
+    // No second physical command owner is installed yet. In particular a
+    // forged/unrecognized endpoint must never fall through to radio 0.
+#ifdef ARDUINO_ARCH_ESP32
+    if (route.tcp && (route.tcp->endpoint().radio != 0 ||
+                      route.tcp->endpoint().session != 0)) {
+        sendError(ERR_INVALID_CMD, route);
+        return;
+    }
+#else
+    if (route.tcp) {
+        sendError(ERR_INVALID_CMD, route);
+        return;
+    }
+#endif
+    processHostCommand(cmd, payload, len, route, primary);
 }
 
 // Legacy USB/UART and W5100S ingress keep their single-transport route.
