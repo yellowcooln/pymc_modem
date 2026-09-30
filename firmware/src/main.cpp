@@ -17,6 +17,7 @@
 #include "radio_config_state.h"
 #include "radio_config_application.h"
 #include "radio_runtime_state.h"
+#include "radio_irq_owner.h"
 #include "radio_command_context.h"
 #include "radio_rx_owner.h"
 #include "radio_cad_owner.h"
@@ -482,7 +483,7 @@ Snapshot capture() {
 IRAM_ATTR
 #endif
 void onDio1Rise() {
-    primaryRadioRuntime.onDio1Rise();
+    RadioIrqOwner<0>::onDio1Rise();
 }
 
 // ─── E22 RF switch boot sequence ────────────────────────────
@@ -1466,6 +1467,8 @@ void setup() {
             while (true) delay(1000);
         }
 
+        // Owner is static and bound before RadioLib can attach the IRQ.
+        RadioIrqOwner<0>::bind(primaryRadioRuntime);
         radio.setDio1Action(onDio1Rise);
         LOG_R_INFO("DIO1 IRQ attached on GPIO%d", (int)BOARD.pin_lora_dio1);
 
@@ -1701,9 +1704,7 @@ void loop() {
 
     // DIO1 during TX is consumed by the TX handler's own wait loop; in
     // loop() we only act on it when the radio is in RX mode.
-    if (primaryRadioRuntime.takeRxIrq()) {
-        handleLoRaRx();
-    }
+    dispatchRadioRx(primaryRadioRuntime, [] { handleLoRaRx(); });
 
     while (Serial.available()) {
         uint8_t b = (uint8_t)Serial.read();

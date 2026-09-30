@@ -12,6 +12,7 @@ def main():
     if not compiler:
         raise SystemExit("g++ is required")
     source = (firmware / "src" / "main.cpp").read_text()
+    assert source.index("RadioIrqOwner<0>::bind(primaryRadioRuntime);") < source.index("radio.setDio1Action(onDio1Rise);")
     callback = source.split("void onDio1Rise() {", 1)[1].split("\n}\n", 1)[0]
     rx_dispatch = source.split("    // DIO1 during TX is consumed", 1)[1].split("\n\n    while (Serial.available())", 1)[0]
     with tempfile.TemporaryDirectory(prefix="openhop-radio-runtime-") as directory:
@@ -26,25 +27,45 @@ def main():
         subprocess.run([str(executable)], check=True)
         # Execute the actual ISR and loop dispatch bodies, not a model of them.
         coupling = directory / "main_runtime_coupling.cpp"
-        coupling.write_text('''#include "radio_runtime_state.h"
+        coupling.write_text('''#include "radio_irq_owner.h"
 #include <cassert>
-RadioRuntimeState primaryRadioRuntime;
-int rxCalls = 0;
-void handleLoRaRx() { ++rxCalls; }
+RadioRuntimeState primaryRadioRuntime, secondaryRadioRuntime;
+int primaryRxCalls = 0, secondaryRxCalls = 0;
+void handleLoRaRx() { ++primaryRxCalls; }
 void onDio1Rise() {''' + callback + '''\n}
 void dispatchRx() {
     // DIO1 during TX is consumed''' + rx_dispatch + '''\n}
 int main() {
+    // Stable bindings are established before either radio attaches its DIO1.
+    assert(RadioIrqOwner<0>::bind(primaryRadioRuntime));
+    assert(RadioIrqOwner<1>::bind(secondaryRadioRuntime));
+    assert(!RadioIrqOwner<0>::bind(secondaryRadioRuntime));
     onDio1Rise();
-    assert(primaryRadioRuntime.irqCount() == 1);
+    assert(primaryRadioRuntime.irqCount() == 1 && !secondaryRadioRuntime.irqPending());
     dispatchRx();
-    assert(rxCalls == 1 && !primaryRadioRuntime.irqPending());
+    assert(primaryRxCalls == 1 && !primaryRadioRuntime.irqPending());
     primaryRadioRuntime.txActive = true;
     onDio1Rise();
+    RadioIrqOwner<1>::onDio1Rise();
     dispatchRx();
-    assert(rxCalls == 1 && primaryRadioRuntime.irqPending());
+    assert(primaryRxCalls == 1 && primaryRadioRuntime.irqPending());
+    assert(secondaryRadioRuntime.irqCount() == 1 && secondaryRadioRuntime.irqPending());
+    dispatchRadioRx(secondaryRadioRuntime, [] { ++secondaryRxCalls; });
+    assert(secondaryRxCalls == 1 && !secondaryRadioRuntime.irqPending());
+    assert(primaryRadioRuntime.irqPending());
     primaryRadioRuntime.clearIrq();
     assert(primaryRadioRuntime.irqCount() == 2);
+    secondaryRadioRuntime.txActive = true;
+    RadioIrqOwner<1>::onDio1Rise();
+    dispatchRadioRx(secondaryRadioRuntime, [] { ++secondaryRxCalls; });
+    assert(secondaryRxCalls == 1 && secondaryRadioRuntime.irqPending());
+    assert(!primaryRadioRuntime.irqPending());
+    secondaryRadioRuntime.clearIrq();
+    secondaryRadioRuntime.txActive = false;
+    RadioIrqOwner<1>::onDio1Rise();
+    dispatchRadioRx(secondaryRadioRuntime, [] { ++secondaryRxCalls; });
+    assert(secondaryRxCalls == 2 && !secondaryRadioRuntime.irqPending());
+    assert(primaryRxCalls == 1 && primaryRadioRuntime.irqCount() == 2);
 }
 ''')
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
