@@ -15,6 +15,7 @@
 #include "legacy_rak4631_build_flags.h"
 #include "protocol.h"
 #include "radio_config_state.h"
+#include "radio_config_application.h"
 #include "radio_runtime_state.h"
 #include "radio_command_context.h"
 #include "board_config.h"
@@ -814,54 +815,26 @@ static bool parseSetWifi(const uint8_t* p, uint16_t len, WifiManager::Config& ou
 #endif
 
 // ─── Radio configuration ────────────────────────────────────
-bool applyConfig(const RadioConfig& cfg) {
-    radio.standby();
-    int state;
-
-    state = radio.setFrequency(cfg.freq_hz / 1e6f);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    state = radio.setBandwidth(cfg.bandwidth_hz / 1000.0f);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    state = radio.setSpreadingFactor(cfg.sf);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    state = radio.setCodingRate(cfg.cr);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    // Board-specific RadioLib/SX1262 command-power ceiling. External PA gain
-    // is antenna-side output and must not be passed to setOutputPower().
-    int8_t pwr = cfg.power_dbm;
-    if (pwr > BOARD.max_tx_power_dbm) pwr = BOARD.max_tx_power_dbm;
-    int currentLimitBefore = (int)radio.getCurrentLimit();
-    state = radio.setOutputPower(pwr);
-    int currentLimitAfter = (int)radio.getCurrentLimit();
-    LOG_R_INFO("applyConfig board=%s fw=%s pwr_req=%d pwr=%d max=%d setOutputPower=%d ocp_before=%dmA ocp_after=%dmA",
-               BOARD.name, fwVersion.c_str(), (int)cfg.power_dbm, (int)pwr,
-               (int)BOARD.max_tx_power_dbm, state, currentLimitBefore,
-               currentLimitAfter);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    state = radio.setSyncWord(cfg.syncword);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    state = radio.setPreambleLength(cfg.preamble_len);
-    if (state != RADIOLIB_ERR_NONE) return false;
-
-    radio.explicitHeader();
-    radio.setCRC(1);
-    radio.invertIQ(false);
-
-    // Auto-LDRO mirrors openHop Core sx1262_wrapper.py — without this,
-    // SF11/SF12 presets are modulation-incompatible with openHop Core.
-    radio.autoLDRO();
-
-    // Push the live config to the TFT cache so the next status
-    // refresh shows what the radio is actually running.
-    oled.setRadioInfo(cfg.freq_hz, cfg.sf, cfg.bandwidth_hz, cfg.cr, pwr,
+// Primary-only presentation after a successful apply. The radio-config seam
+// itself has no display, status, network, or global hardware dependency.
+static void showAppliedConfig(const RadioConfig& cfg, const BoardConfig& board) {
+    const int8_t power = cfg.power_dbm > board.max_tx_power_dbm
+                             ? board.max_tx_power_dbm : cfg.power_dbm;
+    oled.setRadioInfo(cfg.freq_hz, cfg.sf, cfg.bandwidth_hz, cfg.cr, power,
                      status.last_rssi, status.last_snr);
-    return true;
+}
+
+bool applyConfig(RadioHardware& hardware, RadioConfigState& config,
+                 const BoardConfig& board) {
+    // Board-specific RadioLib command-power ceiling, not antenna output.
+    const int8_t power = config.config().power_dbm > board.max_tx_power_dbm
+                             ? board.max_tx_power_dbm : config.config().power_dbm;
+    const bool ok = applyRadioConfig(hardware.radio, config.config(), board.max_tx_power_dbm);
+    LOG_R_INFO("applyConfig board=%s fw=%s pwr_req=%d pwr=%d max=%d applied=%d",
+               board.name, fwVersion.c_str(), (int)config.config().power_dbm, (int)power,
+               (int)board.max_tx_power_dbm, (int)ok);
+    if (ok) showAppliedConfig(config.config(), board);
+    return ok;
 }
 
 bool startReceive() {
@@ -1181,7 +1154,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
                       (unsigned)len, (unsigned long)(primaryRadioRuntime.irqCount() - irqStart));
             radio.standby();
             delay(5);
-            applyConfig(primaryRadioConfig.config());
+            applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD);
             sendError(ERR_TX_TIMEOUT, route);
         }
         startReceive();
@@ -1252,7 +1225,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
             LOG_R_WARN("CAD IRQ timeout — resetting radio");
             radio.standby();
             delay(5);
-            applyConfig(primaryRadioConfig.config());
+            applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD);
             primaryRadioRuntime.clearIrq();
             sendError(ERR_CAD_FAILED, route);
             startReceive();
@@ -1298,20 +1271,18 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
     }
 
     case CMD_SET_CONFIG: {
-        if (!primaryRadioConfig.setFromWire(payload, len)) {
+        // Admission above still refuses secondary commands: there is no
+        // independent secondary SX1262, RF front end, or receive worker yet.
+        if (!payload || len != sizeof(RadioConfig)) {
             sendError(ERR_INVALID_CONFIG, route);
             break;
         }
-        LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s freq=%lu bw=%lu sf=%u cr=%u pwr_req=%d sync=0x%04X pre=%u",
-                   (unsigned)src, BOARD.name, fwVersion.c_str(),
-                   (unsigned long)primaryRadioConfig.config().freq_hz,
-                   (unsigned long)primaryRadioConfig.config().bandwidth_hz,
-                   (unsigned)primaryRadioConfig.config().sf, (unsigned)primaryRadioConfig.config().cr,
-                   (int)primaryRadioConfig.config().power_dbm,
-                   (unsigned)primaryRadioConfig.config().syncword,
-                   (unsigned)primaryRadioConfig.config().preamble_len);
-        if (applyConfig(primaryRadioConfig.config())) {
-            sendFrame(CMD_CONFIG_RESP, primaryRadioConfig.wireData(), sizeof(RadioConfig), route);
+        LOG_R_INFO("SET_CONFIG recv src=%u board=%s fw=%s", (unsigned)src,
+                   BOARD.name, fwVersion.c_str());
+        if (applyRadioConfigRequest(primaryRadioHardware.radio, owner.config,
+                                    payload, len, BOARD.max_tx_power_dbm)) {
+            showAppliedConfig(owner.config.config(), BOARD);
+            sendFrame(CMD_CONFIG_RESP, owner.config.wireData(), sizeof(RadioConfig), route);
             startReceive();
         } else {
             sendError(ERR_INVALID_CONFIG, route);
@@ -1431,7 +1402,7 @@ void processHostCommand(uint8_t cmd, const uint8_t* payload, uint16_t len,
 #if defined(BOARD_HELTEC_T114)
         NodeState::setStandby(false);
 #endif
-        bool ok = applyConfig(primaryRadioConfig.config()) && startReceive();
+        bool ok = applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD) && startReceive();
         LOG_R_INFO("radio RESUME (ok=%d)", (int)ok);
         uint8_t status = ok ? 0 : 1;
         sendFrame(CMD_RADIO_RESUME_RESP, &status, 1, route);
@@ -1709,7 +1680,7 @@ void setup() {
         configureRadioRfSwitch(primaryRadioHardware.radio, BOARD.rf_switch, Serial);
         configureRadioSx126xOptions(primaryRadioHardware.radio, BOARD, Serial);
 
-        if (!applyConfig(primaryRadioConfig.config())) {
+        if (!applyConfig(primaryRadioHardware, primaryRadioConfig, BOARD)) {
             oled.showError("Config fail!");
             sendError(ERR_INVALID_CONFIG, TransportSource::USB);
             while (true) delay(1000);
